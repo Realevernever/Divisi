@@ -1,0 +1,24 @@
+{
+  "name": "divisi",
+  "version": "0.1.0",
+  "description": "Delegate Codex work to frontier-model vendor CLIs.",
+  "type": "module",
+  "bin": {
+    "divisi": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
