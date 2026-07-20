@@ -8,6 +8,28 @@ Each option declares:
 - `flag`: the Worker CLI argument template; `{value}` is replaced with the selected value
 - `default`: the value used when `delegate` omits that option
 
+Worker entries may also declare:
+
+- `required_env`: auth environment variable names reported by `divisi doctor`;
+  the registry never contains their values
+- `version_args`: arguments used by `divisi doctor` to read the CLI version;
+  when omitted, Divisi uses `["--version"]`
+
+### Doctor output
+
+`divisi doctor` prints one tab-separated row per Worker:
+
+```text
+<id>  cli=found|not-found  version=<output>  <ENV_NAME>=set|not-set
+```
+
+The version column is present only when the command is found. A missing command,
+a non-zero or empty version response, or any missing required environment
+variable makes the command exit non-zero; otherwise it exits zero. Version
+commands receive only PATH lookup and operating-system process essentials, never
+the named auth variables. Doctor creates no logs and remains advisory:
+`delegate` does not consult probe results.
+
 Template tokens separated by whitespace become separate CLI arguments. The shipped example leans toward high reasoning effort:
 
 ```json

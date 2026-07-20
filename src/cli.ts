@@ -2,16 +2,19 @@
 
 import { createInterface } from "node:readline";
 import {
+  accessSync,
+  constants,
   mkdirSync,
   readFileSync,
   readdirSync,
   renameSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const tools = [
@@ -119,6 +122,8 @@ type Worker = {
   command: string;
   args: string[];
   output_dialect: "plain";
+  required_env?: string[];
+  version_args?: string[];
   options?: Record<string, WorkerOption>;
 };
 
@@ -163,6 +168,113 @@ function registryWorkers(): Worker[] {
   };
   return registry.workers;
 }
+
+function executableOnPath(command: string): string | undefined {
+  const hasDirectory = command.includes("/") || command.includes("\\");
+  const directories = hasDirectory
+    ? [""]
+    : (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  const extensions =
+    process.platform === "win32" && extname(command) === ""
+      ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";")
+      : [""];
+
+  for (const directory of directories) {
+    const base = hasDirectory
+      ? isAbsolute(command)
+        ? command
+        : resolve(command)
+      : join(directory, command);
+    for (const extension of extensions) {
+      const candidate = `${base}${extension.toLowerCase()}`;
+      try {
+        if (!statSync(candidate).isFile()) continue;
+        if (process.platform !== "win32") {
+          accessSync(candidate, constants.X_OK);
+        }
+        return candidate;
+      } catch {}
+    }
+  }
+  return undefined;
+}
+
+function versionEnvironment(): NodeJS.ProcessEnv {
+  const names =
+    process.platform === "win32"
+      ? ["PATH", "PATHEXT", "ComSpec", "SystemRoot", "WINDIR"]
+      : ["PATH"];
+  return Object.fromEntries(
+    names.flatMap((name) => {
+      const value = process.env[name];
+      return value === undefined ? [] : [[name, value]];
+    }),
+  );
+}
+
+function oneLine(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function workerVersion(
+  executable: string,
+  versionArgs: string[],
+): { output: string; healthy: boolean } {
+  const options = {
+    encoding: "utf8" as const,
+    env: versionEnvironment(),
+    windowsHide: true,
+  };
+  const result =
+    process.platform === "win32" && /\.(?:cmd|bat)$/i.test(executable)
+      ? spawnSync(
+          process.env.ComSpec ?? "cmd.exe",
+          [
+            "/d",
+            "/s",
+            "/c",
+            `call ${[executable, ...versionArgs]
+              .map((part) => `"${part.replaceAll('"', '""')}"`)
+              .join(" ")}`,
+          ],
+          { ...options, windowsVerbatimArguments: true },
+        )
+      : spawnSync(executable, versionArgs, options);
+  const output = oneLine(
+    `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
+  );
+  return {
+    output: output || "unavailable",
+    healthy: result.status === 0 && output.length > 0,
+  };
+}
+
+function doctor(): number {
+  let allHealthy = true;
+  for (const worker of registryWorkers()) {
+    const executable = executableOnPath(worker.command);
+    const version = executable
+      ? workerVersion(executable, worker.version_args ?? ["--version"])
+      : undefined;
+    const auth = (worker.required_env ?? []).map((name) => ({
+      name,
+      set: Object.hasOwn(process.env, name),
+    }));
+    const healthy = version?.healthy === true && auth.every(({ set }) => set);
+    allHealthy &&= healthy;
+    const columns = [
+      oneLine(worker.id),
+      `cli=${executable ? "found" : "not-found"}`,
+      ...(version ? [`version=${version.output}`] : []),
+      ...auth.map(
+        ({ name, set }) => `${oneLine(name)}=${set ? "set" : "not-set"}`,
+      ),
+    ];
+    process.stdout.write(`${columns.join("\t")}\n`);
+  }
+  return allHealthy ? 0 : 1;
+}
+
 
 function userStateDirectory(): string {
   if (process.platform === "win32") {
@@ -562,7 +674,9 @@ function serve(): void {
 
 if (process.argv[2] === "serve") {
   serve();
+} else if (process.argv[2] === "doctor") {
+  process.exitCode = doctor();
 } else {
-  process.stderr.write("Usage: divisi serve\n");
+  process.stderr.write("Usage: divisi <serve|doctor>\n");
   process.exitCode = 1;
 }
