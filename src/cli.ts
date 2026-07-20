@@ -24,6 +24,10 @@ const tools = [
         worker: { type: "string" },
         task_brief: { type: "string" },
         working_dir: { type: "string" },
+        options: {
+          type: "object",
+          additionalProperties: { type: "string" },
+        },
         wait_seconds: { type: "number", minimum: 0 },
       },
       required: ["worker", "task_brief", "working_dir", "wait_seconds"],
@@ -103,12 +107,23 @@ function respondError(
   write({ jsonrpc: "2.0", id, error: { code, message } });
 }
 
+type WorkerOption = {
+  values: string[];
+  flag: string;
+  default: string;
+};
+
 type Worker = {
   id: string;
   capability_summary: string;
   command: string;
   args: string[];
   output_dialect: "plain";
+  options?: Record<string, WorkerOption>;
+};
+
+type ListedWorker = Pick<Worker, "id" | "capability_summary"> & {
+  options: Record<string, Pick<WorkerOption, "values" | "default">>;
 };
 
 function toolResult(payload: unknown): {
@@ -119,10 +134,16 @@ function toolResult(payload: unknown): {
   };
 }
 
-function listWorkers(): Array<Pick<Worker, "id" | "capability_summary">> {
-  return registryWorkers().map(({ id, capability_summary }) => ({
+function listWorkers(): ListedWorker[] {
+  return registryWorkers().map(({ id, capability_summary, options = {} }) => ({
     id,
     capability_summary,
+    options: Object.fromEntries(
+      Object.entries(options).map(([name, { values, default: defaultValue }]) => [
+        name,
+        { values, default: defaultValue },
+      ]),
+    ),
   }));
 }
 
@@ -334,11 +355,17 @@ async function startDelegation(
   workerId: string,
   taskBrief: string,
   workingDir: string,
+  requestedOptions: Record<string, string>,
 ): Promise<{ jobId: string }> {
   const worker = registryWorkers().find(({ id }) => id === workerId);
   if (!worker) throw new Error(`Unknown Worker: ${workerId}`);
   if (worker.output_dialect !== "plain") {
     throw new Error(`Unsupported Output dialect: ${worker.output_dialect}`);
+  }
+  const declaredOptions = worker.options ?? {};
+  for (const name of Object.keys(requestedOptions)) {
+    if (!Object.hasOwn(declaredOptions, name))
+      throw new Error(`Unknown Worker option: ${name}`);
   }
 
   const jobId = randomUUID();
@@ -347,11 +374,22 @@ async function startDelegation(
   const logPath = join(logsDirectory, `${jobId}.log`);
   writeFileSync(logPath, "");
   const createdAt = new Date().toISOString();
-  const args = worker.args.map((arg) =>
-    arg
-      .replaceAll("{task_brief}", taskBrief)
-      .replaceAll("{working_dir}", workingDir),
-  );
+  const args = [
+    ...worker.args.map((arg) =>
+      arg
+        .replaceAll("{task_brief}", taskBrief)
+        .replaceAll("{working_dir}", workingDir),
+    ),
+    ...Object.entries(declaredOptions).flatMap(([name, option]) => {
+      const value = requestedOptions[name] ?? option.default;
+      if (!option.values.includes(value))
+        throw new Error(`Unknown value for Worker option ${name}: ${value}`);
+      return option.flag
+        .trim()
+        .split(/\s+/)
+        .map((arg) => arg.replaceAll("{value}", value));
+    }),
+  ];
   writeJob(jobId, {
     job_id: jobId,
     worker: workerId,
@@ -437,6 +475,7 @@ function serve(): void {
             String(args.worker),
             String(args.task_brief),
             String(args.working_dir),
+            (args.options ?? {}) as Record<string, string>,
           );
           const result = await waitForResult(
             jobId,

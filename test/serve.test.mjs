@@ -35,9 +35,15 @@ test("an MCP client discovers the tracer-bullet tools", async (t) => {
       "list_workers",
     ],
   );
+
+  const delegate = response.tools.find((tool) => tool.name === "delegate");
+  assert.deepEqual(delegate.inputSchema.properties.options, {
+    type: "object",
+    additionalProperties: { type: "string" },
+  });
 });
 
-test("list_workers reports registry ids and capability summaries", async (t) => {
+test("list_workers reports safe Worker option discovery without flag syntax", async (t) => {
   const fixture = await mkdtemp(resolve(tmpdir(), "divisi-registry-"));
   t.after(() => rm(fixture, { recursive: true, force: true }));
   const registryPath = resolve(fixture, "workers.json");
@@ -51,6 +57,13 @@ test("list_workers reports registry ids and capability summaries", async (t) => 
           command: process.execPath,
           args: ["fake-worker.mjs", "{task_brief}"],
           output_dialect: "plain",
+          options: {
+            effort: {
+              values: ["low", "medium", "high"],
+              flag: "--effort {value}",
+              default: "high",
+            },
+          },
         },
       ],
     }),
@@ -68,8 +81,15 @@ test("list_workers reports registry ids and capability summaries", async (t) => 
     {
       id: "fake",
       capability_summary: "A scripted Worker for end-to-end tests.",
+      options: {
+        effort: {
+          values: ["low", "medium", "high"],
+          default: "high",
+        },
+      },
     },
   ]);
+  assert.equal(JSON.stringify(workers).includes("--effort"), false);
 });
 
 test("delegate returns a finished Worker's mechanical result verbatim", async (t) => {
@@ -524,4 +544,138 @@ test("job_cancel terminates a running Worker and persists canceled", async (t) =
   assert.equal(status.alive, false);
   assert.match(canceled.final_message, /waiting for cancellation/);
   await assert.rejects(readFile(survivedPath, "utf8"));
+});
+
+async function startOptionWorker(
+  t,
+  { fixturePrefix, args, workerSource = "" },
+) {
+  const fixture = await mkdtemp(resolve(tmpdir(), fixturePrefix));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  await mkdir(workingDir);
+  await writeFile(workerPath, workerSource);
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "fake",
+          capability_summary: "A scripted Worker for option tests.",
+          command: process.execPath,
+          args: [workerPath, ...args],
+          output_dialect: "plain",
+          options: {
+            effort: {
+              values: ["low", "medium", "high"],
+              flag: "--effort {value}",
+              default: "high",
+            },
+          },
+        },
+      ],
+    }),
+  );
+  const client = new McpClient({
+    cwd: repoRoot,
+    env: {
+      DIVISI_WORKERS_FILE: registryPath,
+      LOCALAPPDATA: stateRoot,
+      XDG_STATE_HOME: stateRoot,
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await client.initialize();
+  return { client, stateRoot, workingDir };
+}
+
+test("delegate maps a declared Worker option onto the Worker CLI argv", async (t) => {
+  const { client, workingDir } = await startOptionWorker(t, {
+    fixturePrefix: "divisi-options-",
+    args: ["{task_brief}", "{working_dir}"],
+    workerSource:
+      'process.stdout.write(JSON.stringify(process.argv.slice(2)));',
+  });
+
+  const result = await client.callTool("delegate", {
+    worker: "fake",
+    task_brief: "Use medium effort.",
+    working_dir: workingDir,
+    options: { effort: "medium" },
+    wait_seconds: 5,
+  });
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(JSON.parse(result.final_message), [
+    "Use medium effort.",
+    workingDir,
+    "--effort",
+    "medium",
+  ]);
+});
+
+test("delegate applies a declared Worker option default when options are omitted", async (t) => {
+  const { client, workingDir } = await startOptionWorker(t, {
+    fixturePrefix: "divisi-option-default-",
+    args: ["{task_brief}"],
+    workerSource:
+      'process.stdout.write(JSON.stringify(process.argv.slice(2)));',
+  });
+
+  const result = await client.callTool("delegate", {
+    worker: "fake",
+    task_brief: "Use the default.",
+    working_dir: workingDir,
+    wait_seconds: 5,
+  });
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(JSON.parse(result.final_message), [
+    "Use the default.",
+    "--effort",
+    "high",
+  ]);
+});
+
+test("delegate rejects an option name the Worker registry does not declare", async (t) => {
+  const { client, stateRoot, workingDir } = await startOptionWorker(t, {
+    fixturePrefix: "divisi-unknown-option-",
+    args: [],
+  });
+
+  await assert.rejects(
+    client.callTool("delegate", {
+      worker: "fake",
+      task_brief: "Reject the unknown option.",
+      working_dir: workingDir,
+      options: { speed: "fast" },
+      wait_seconds: 5,
+    }),
+    /Unknown Worker option: speed/,
+  );
+  await assert.rejects(readdir(resolve(stateRoot, "divisi", "jobs")));
+});
+
+test("delegate rejects a Worker option value outside the registry allowlist", async (t) => {
+  const { client, stateRoot, workingDir } = await startOptionWorker(t, {
+    fixturePrefix: "divisi-unknown-value-",
+    args: [],
+  });
+
+  await assert.rejects(
+    client.callTool("delegate", {
+      worker: "fake",
+      task_brief: "Reject the unknown value.",
+      working_dir: workingDir,
+      options: { effort: "maximum-overdrive" },
+      wait_seconds: 5,
+    }),
+    /Unknown value for Worker option effort: maximum-overdrive/,
+  );
+  await assert.rejects(readdir(resolve(stateRoot, "divisi", "jobs")));
 });
