@@ -74,8 +74,16 @@ export class McpClient {
 
   async close() {
     if (this.#child.exitCode !== null) return;
+    const exited = once(this.#child, "exit");
     this.#child.stdin.end();
-    await once(this.#child, "exit");
+    await exited;
+  }
+
+  async terminate() {
+    if (this.#child.exitCode !== null) return;
+    const exited = once(this.#child, "exit");
+    this.#child.kill();
+    await exited;
   }
 }
 

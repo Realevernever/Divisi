@@ -1,0 +1,129 @@
+import { execFileSync, spawn } from "node:child_process";
+import {
+  closeSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+
+type LaunchRecord = {
+  command: string;
+  args: string[];
+};
+
+type JobRecord = {
+  job_id: string;
+  worker: string;
+  status: "starting" | "running" | "completed" | "failed" | "timeout" | "canceled";
+  pid: number | null;
+  controller_pid: number | null;
+  working_dir: string;
+  task_brief: string;
+  created_at: string;
+  started_at: string;
+  finished_at?: string;
+  log_path: string;
+  cancel_requested_at?: string;
+  launch?: LaunchRecord;
+  exit_code?: number | null;
+  signal?: string | null;
+  final_message?: string;
+  git_diff_stat?: string;
+  duration_ms?: number;
+};
+
+const jobPathArgument = process.argv[2];
+if (!jobPathArgument) throw new Error("Job record path is required");
+const jobPath: string = jobPathArgument;
+
+function readJob(): JobRecord {
+  return JSON.parse(readFileSync(jobPath, "utf8")) as JobRecord;
+}
+
+function writeJob(job: JobRecord): void {
+  const temporaryPath = join(
+    dirname(jobPath),
+    `.${job.job_id}.${process.pid}.tmp`,
+  );
+  writeFileSync(temporaryPath, JSON.stringify(job));
+  renameSync(temporaryPath, jobPath);
+}
+
+function gitDiffStat(workingDir: string): string {
+  try {
+    return execFileSync("git", ["diff", "--stat", "--no-ext-diff"], {
+      cwd: workingDir,
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return "";
+  }
+}
+
+function finish(
+  running: JobRecord,
+  status: "completed" | "failed",
+  exitCode: number | null,
+  signal: string | null,
+): void {
+  const current = readJob();
+  if (
+    current.status === "canceled" ||
+    current.status === "timeout" ||
+    current.cancel_requested_at
+  ) return;
+  const finishedAt = new Date();
+  const { launch: _launch, ...publicRecord } = running;
+  writeJob({
+    ...publicRecord,
+    status,
+    exit_code: exitCode,
+    signal,
+    finished_at: finishedAt.toISOString(),
+    final_message: readFileSync(running.log_path, "utf8"),
+    git_diff_stat: gitDiffStat(running.working_dir),
+    duration_ms: finishedAt.getTime() - Date.parse(running.started_at),
+  });
+}
+
+const initial = readJob();
+if (!initial.launch) throw new Error("Job launch record is missing");
+const logFile = openSync(initial.log_path, "a");
+let child;
+try {
+  child = spawn(initial.launch.command, initial.launch.args, {
+    cwd: initial.working_dir,
+    windowsHide: true,
+    stdio: ["ignore", logFile, logFile],
+  });
+} catch {
+  closeSync(logFile);
+  finish(initial, "failed", null, null);
+  process.exit(1);
+}
+closeSync(logFile);
+
+const running: JobRecord = {
+  ...initial,
+  status: "running",
+  pid: child.pid ?? null,
+  controller_pid: process.pid,
+  started_at: new Date().toISOString(),
+};
+writeJob(running);
+
+let settled = false;
+child.once("error", () => {
+  if (settled) return;
+  settled = true;
+  finish(running, "failed", null, null);
+});
+child.once("close", (code, signal) => {
+  if (settled) return;
+  settled = true;
+  finish(running, code === 0 ? "completed" : "failed", code, signal);
+});

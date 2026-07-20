@@ -2,16 +2,17 @@
 
 import { createInterface } from "node:readline";
 import {
-  closeSync,
   mkdirSync,
-  openSync,
   readFileSync,
+  readdirSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const tools = [
   {
@@ -30,8 +31,37 @@ const tools = [
     },
   },
   {
+    name: "job_status",
+    description: "Read the current mechanical status of a Delegation.",
+    inputSchema: {
+      type: "object",
+      properties: { job_id: { type: "string" } },
+      required: ["job_id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "job_result",
     description: "Read the mechanical result of a Delegation.",
+    inputSchema: {
+      type: "object",
+      properties: { job_id: { type: "string" } },
+      required: ["job_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "job_list",
+    description: "List Delegations recorded in the persistent Job store.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "job_cancel",
+    description: "Cancel a running Delegation and its process group.",
     inputSchema: {
       type: "object",
       properties: { job_id: { type: "string" } },
@@ -97,15 +127,12 @@ function listWorkers(): Array<Pick<Worker, "id" | "capability_summary">> {
 }
 
 type JobResult = {
-  status: "completed" | "failed";
+  status: "completed" | "failed" | "timeout" | "canceled";
   final_message: string;
   git_diff_stat: string;
   duration_ms: number;
   log_path: string;
 };
-
-const activeJobs = new Map<string, Promise<JobResult>>();
-const completedJobs = new Map<string, JobResult>();
 
 function registryWorkers(): Worker[] {
   const registryPath = process.env.DIVISI_WORKERS_FILE;
@@ -132,7 +159,99 @@ function userStateDirectory(): string {
 function writeJob(jobId: string, value: unknown): void {
   const jobsDirectory = join(userStateDirectory(), "jobs");
   mkdirSync(jobsDirectory, { recursive: true });
-  writeFileSync(join(jobsDirectory, `${jobId}.json`), JSON.stringify(value));
+  const jobPath = join(jobsDirectory, `${jobId}.json`);
+  const temporaryPath = join(
+    jobsDirectory,
+    `.${jobId}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  writeFileSync(temporaryPath, JSON.stringify(value));
+  renameSync(temporaryPath, jobPath);
+}
+
+function listJobs(): unknown[] {
+  const jobsDirectory = join(userStateDirectory(), "jobs");
+  try {
+    return readdirSync(jobsDirectory)
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => JSON.parse(readFileSync(join(jobsDirectory, name), "utf8")))
+      .map((job) => publicJob(job as Record<string, unknown>));
+  } catch {
+    return [];
+  }
+}
+function publicJob(job: Record<string, unknown>): Record<string, unknown> {
+  const {
+    launch: _launch,
+    controller_pid: _controllerPid,
+    cancel_requested_at: _cancelRequestedAt,
+    ...visible
+  } = job;
+  return visible;
+}
+
+
+
+function readJob(jobId: string): Record<string, unknown> {
+  try {
+    return JSON.parse(
+      readFileSync(join(userStateDirectory(), "jobs", `${jobId}.json`), "utf8"),
+    ) as Record<string, unknown>;
+  } catch {
+    throw new Error(`Unknown job: ${jobId}`);
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "EPERM"
+    );
+  }
+}
+
+function jobStatus(jobId: string): Record<string, unknown> {
+  const job = readJob(jobId);
+  const logPath = String(job.log_path);
+  let output = "";
+  try {
+    output = readFileSync(logPath, "utf8");
+  } catch {}
+  const alive = job.status === "running" && isProcessAlive(Number(job.pid));
+  return { ...publicJob(job), alive, recent_output: output.slice(-16_384) };
+}
+const terminalStatuses = new Set([
+  "completed",
+  "failed",
+  "timeout",
+  "canceled",
+]);
+
+function toJobResult(job: Record<string, unknown>): JobResult | undefined {
+  if (!terminalStatuses.has(String(job.status))) return undefined;
+  return {
+    status: job.status as JobResult["status"],
+    final_message: String(job.final_message ?? ""),
+    git_diff_stat: String(job.git_diff_stat ?? ""),
+    duration_ms: Number(job.duration_ms ?? 0),
+    log_path: String(job.log_path),
+  };
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function readLog(logPath: string): string {
+  try {
+    return readFileSync(logPath, "utf8");
+  } catch {
+    return "";
+  }
 }
 
 function gitDiffStat(workingDir: string): string {
@@ -148,11 +267,74 @@ function gitDiffStat(workingDir: string): string {
   }
 }
 
-function startDelegation(
+function terminateWindowsTree(pid: number): void {
+  execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+    windowsHide: true,
+    stdio: "ignore",
+  });
+}
+
+async function cancelJob(jobId: string): Promise<JobResult> {
+  const job = readJob(jobId);
+  const existingResult = toJobResult(job);
+  if (existingResult) return existingResult;
+
+  const requestedAt = new Date().toISOString();
+  writeJob(jobId, { ...job, cancel_requested_at: requestedAt });
+  const controllerPid = Number(job.controller_pid);
+  const workerPid = Number(job.pid);
+  try {
+    if (process.platform === "win32") {
+      terminateWindowsTree(controllerPid);
+    } else {
+      process.kill(-controllerPid, "SIGTERM");
+    }
+  } catch {
+    if (isProcessAlive(controllerPid) || isProcessAlive(workerPid)) {
+      throw new Error("Could not cancel job process group: " + jobId);
+    }
+  }
+
+  const deadline = Date.now() + 2_000;
+  while (
+    Date.now() < deadline &&
+    (isProcessAlive(controllerPid) || isProcessAlive(workerPid))
+  ) {
+    await sleep(20);
+  }
+  if (isProcessAlive(controllerPid) || isProcessAlive(workerPid)) {
+    if (process.platform === "win32") {
+      if (isProcessAlive(controllerPid)) terminateWindowsTree(controllerPid);
+      if (isProcessAlive(workerPid)) terminateWindowsTree(workerPid);
+    } else {
+      process.kill(-controllerPid, "SIGKILL");
+    }
+  }
+  if (isProcessAlive(controllerPid) || isProcessAlive(workerPid)) {
+    throw new Error("Job process group survived cancellation: " + jobId);
+  }
+
+  const current = readJob(jobId);
+  const finishedAt = new Date();
+  const { launch: _launch, ...persistent } = current;
+  writeJob(jobId, {
+    ...persistent,
+    status: "canceled",
+    exit_code: null,
+    signal: process.platform === "win32" ? "taskkill" : "SIGTERM",
+    finished_at: finishedAt.toISOString(),
+    final_message: readLog(String(job.log_path)),
+    git_diff_stat: gitDiffStat(String(job.working_dir)),
+    duration_ms: finishedAt.getTime() - Date.parse(String(job.started_at)),
+  });
+  return toJobResult(readJob(jobId)) as JobResult;
+}
+
+async function startDelegation(
   workerId: string,
   taskBrief: string,
   workingDir: string,
-): { jobId: string; completion: Promise<JobResult> } {
+): Promise<{ jobId: string }> {
   const worker = registryWorkers().find(({ id }) => id === workerId);
   if (!worker) throw new Error(`Unknown Worker: ${workerId}`);
   if (worker.output_dialect !== "plain") {
@@ -163,75 +345,61 @@ function startDelegation(
   const logsDirectory = join(userStateDirectory(), "logs");
   mkdirSync(logsDirectory, { recursive: true });
   const logPath = join(logsDirectory, `${jobId}.log`);
-  const logFile = openSync(logPath, "w");
-  const startedAt = Date.now();
+  writeFileSync(logPath, "");
+  const createdAt = new Date().toISOString();
   const args = worker.args.map((arg) =>
     arg
       .replaceAll("{task_brief}", taskBrief)
       .replaceAll("{working_dir}", workingDir),
   );
-  let child;
-  try {
-    child = spawn(worker.command, args, {
-      cwd: workingDir,
-      detached: true,
-      windowsHide: true,
-      stdio: ["ignore", logFile, logFile],
-    });
-  } finally {
-    closeSync(logFile);
-  }
-  child.unref();
   writeJob(jobId, {
     job_id: jobId,
-    status: "running",
-    pid: child.pid,
+    worker: workerId,
+    status: "starting",
+    pid: null,
+    controller_pid: null,
     working_dir: workingDir,
+    task_brief: taskBrief,
+    created_at: createdAt,
+    started_at: createdAt,
     log_path: logPath,
+    launch: { command: worker.command, args },
   });
 
-  const completion = new Promise<JobResult>((resolve) => {
-    let settled = false;
-    const finish = (status: "completed" | "failed"): void => {
-      if (settled) return;
-      settled = true;
-      const result: JobResult = {
-        status,
-        final_message: readFileSync(logPath, "utf8"),
-        git_diff_stat: gitDiffStat(workingDir),
-        duration_ms: Date.now() - startedAt,
-        log_path: logPath,
-      };
-      completedJobs.set(jobId, result);
-      activeJobs.delete(jobId);
-      writeJob(jobId, result);
-      resolve(result);
-    };
-    child.once("error", () => finish("failed"));
-    child.once("close", (code) => finish(code === 0 ? "completed" : "failed"));
+  const jobPath = join(userStateDirectory(), "jobs", `${jobId}.json`);
+  const runnerPath = fileURLToPath(new URL("./job-runner.js", import.meta.url));
+  const controller = spawn(process.execPath, [runnerPath, jobPath], {
+    detached: true,
+    windowsHide: true,
+    stdio: "ignore",
   });
-  activeJobs.set(jobId, completion);
-  return { jobId, completion };
+  controller.unref();
+
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const job = readJob(jobId);
+    if (job.status !== "starting") return { jobId };
+    if (controller.exitCode !== null) {
+      throw new Error(`Job controller exited before starting Worker: ${jobId}`);
+    }
+    await sleep(10);
+  }
+  throw new Error(`Timed out starting Worker: ${jobId}`);
 }
 
 async function waitForResult(
-  completion: Promise<JobResult>,
+  jobId: string,
   waitSeconds: number,
 ): Promise<JobResult | undefined> {
   if (waitSeconds <= 0) return undefined;
-  let timer: number | NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      completion,
-      new Promise<undefined>((resolve) => {
-        timer = setTimeout(resolve, waitSeconds * 1_000);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  const deadline = Date.now() + waitSeconds * 1_000;
+  do {
+    const result = toJobResult(readJob(jobId));
+    if (result) return result;
+    await sleep(Math.min(25, Math.max(1, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  return toJobResult(readJob(jobId));
 }
-
 function serve(): void {
   const input = createInterface({ input: process.stdin });
   input.on("line", async (line) => {
@@ -265,16 +433,30 @@ function serve(): void {
         try {
           const args = (request.params as { arguments?: Record<string, unknown> })
             .arguments ?? {};
-          const { jobId, completion } = startDelegation(
+          const { jobId } = await startDelegation(
             String(args.worker),
             String(args.task_brief),
             String(args.working_dir),
           );
           const result = await waitForResult(
-            completion,
+            jobId,
             Number(args.wait_seconds),
           );
           respond(requestId, toolResult(result ?? { job_id: jobId }));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          respond(requestId, {
+            isError: true,
+            ...toolResult({ error: message }),
+          });
+        }
+        return;
+      }
+      if (params.name === "job_status") {
+        const args = (request.params as { arguments?: Record<string, unknown> })
+          .arguments ?? {};
+        try {
+          respond(requestId, toolResult(jobStatus(String(args.job_id))));
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           respond(requestId, {
@@ -288,17 +470,37 @@ function serve(): void {
         const args = (request.params as { arguments?: Record<string, unknown> })
           .arguments ?? {};
         const jobId = String(args.job_id);
-        const result = completedJobs.get(jobId);
-        if (result) {
-          respond(requestId, toolResult(result));
-        } else if (activeJobs.has(jobId)) {
-          respond(requestId, toolResult({ job_id: jobId }));
-        } else {
+        try {
+          const result = toJobResult(readJob(jobId));
+          respond(
+            requestId,
+            toolResult(result ?? { job_id: jobId }),
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
           respond(requestId, {
             isError: true,
-            ...toolResult({ error: `Unknown job: ${jobId}` }),
+            ...toolResult({ error: message }),
           });
         }
+        return;
+      }
+      if (params.name === "job_cancel") {
+        const args = (request.params as { arguments?: Record<string, unknown> })
+          .arguments ?? {};
+        try {
+          respond(requestId, toolResult(await cancelJob(String(args.job_id))));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          respond(requestId, {
+            isError: true,
+            ...toolResult({ error: message }),
+          });
+        }
+        return;
+      }
+      if (params.name === "job_list") {
+        respond(requestId, toolResult(listJobs()));
         return;
       }
       if (params.name === "list_workers") {
