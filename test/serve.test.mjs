@@ -41,6 +41,10 @@ test("an MCP client discovers the tracer-bullet tools", async (t) => {
     type: "object",
     additionalProperties: { type: "string" },
   });
+  assert.deepEqual(delegate.inputSchema.properties.isolation, {
+    type: "string",
+    enum: ["in_place", "worktree"],
+  });
 });
 
 test("list_workers reports safe Worker option discovery without flag syntax", async (t) => {
@@ -155,7 +159,7 @@ test("delegate returns a finished Worker's mechanical result verbatim", async (t
     worker: "fake",
     task_brief: taskBrief,
     working_dir: workingDir,
-    wait_seconds: 5,
+    wait_seconds: 15,
   });
 
   assert.deepEqual(Object.keys(result).sort(), [
@@ -170,6 +174,164 @@ test("delegate returns a finished Worker's mechanical result verbatim", async (t
   assert.ok(result.log_path.startsWith(`${resolve(stateRoot, "divisi")}${sep}`));
   assert.equal(result.log_path.startsWith(`${workingDir}${sep}`), false);
   assert.ok((await readdir(resolve(stateRoot, "divisi", "jobs"))).length > 0);
+});
+
+
+test("worktree delegation snapshots Worker changes on an unmerged branch", async (t) => {
+  const fixture = await mkdtemp(resolve(tmpdir(), "divisi-worktree-"));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "worktree-worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  let worktreePath;
+  await mkdir(workingDir);
+  await writeFile(resolve(workingDir, "tracked.txt"), "orchestrator copy\n");
+  execFileSync("git", ["init", "-b", "main"], { cwd: workingDir });
+  execFileSync("git", ["add", "tracked.txt"], { cwd: workingDir });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Divisi Test",
+      "-c",
+      "user.email=divisi@example.invalid",
+      "commit",
+      "-m",
+      "fixture",
+    ],
+    { cwd: workingDir },
+  );
+  const mainCommit = execFileSync("git", ["rev-parse", "main"], {
+    cwd: workingDir,
+    encoding: "utf8",
+  }).trim();
+  await writeFile(resolve(workingDir, "tracked.txt"), "orchestrator local\n");
+  await writeFile(resolve(workingDir, "orchestrator-only.txt"), "stay local\n");
+  const orchestratorStatus = execFileSync("git", ["status", "--porcelain"], {
+    cwd: workingDir,
+    encoding: "utf8",
+  });
+  assert.match(orchestratorStatus, /tracked\.txt/);
+  assert.match(orchestratorStatus, /orchestrator-only\.txt/);
+  await writeFile(
+    workerPath,
+    [
+      'import { writeFile } from "node:fs/promises";',
+      'await writeFile("worker-change.txt", "preserved by snapshot\\n");',
+      "process.stdout.write(process.cwd());",
+    ].join("\n"),
+  );
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "worktree-fake",
+          capability_summary: "A scripted Worker that edits its current tree.",
+          command: process.execPath,
+          args: [workerPath, "{task_brief}"],
+          output_dialect: "plain",
+        },
+      ],
+    }),
+  );
+  const client = new McpClient({
+    cwd: repoRoot,
+    env: {
+      DIVISI_WORKERS_FILE: registryPath,
+      LOCALAPPDATA: stateRoot,
+      XDG_STATE_HOME: stateRoot,
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    if (worktreePath) {
+      try {
+        execFileSync("git", ["worktree", "remove", "--force", worktreePath], {
+          cwd: workingDir,
+        });
+      } catch {}
+    }
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await client.initialize();
+
+  const result = await client.callTool("delegate", {
+    worker: "worktree-fake",
+    task_brief: "Edit only the isolated worktree.",
+    working_dir: workingDir,
+    isolation: "worktree",
+    wait_seconds: 15,
+  });
+  worktreePath = result.final_message;
+
+  assert.deepEqual(Object.keys(result).sort(), [
+    "branch",
+    "duration_ms",
+    "final_message",
+    "git_diff_stat",
+    "log_path",
+    "status",
+  ]);
+  assert.equal(result.status, "completed");
+  assert.match(result.branch, /^divisi\/[0-9a-f-]+$/);
+  assert.ok(worktreePath.startsWith(`${resolve(stateRoot, "divisi", "worktrees")}${sep}`));
+  assert.notEqual(worktreePath, workingDir);
+  assert.match(result.git_diff_stat, /worker-change\.txt/);
+  await assert.rejects(readFile(resolve(workingDir, "worker-change.txt"), "utf8"));
+  assert.equal(
+    execFileSync("git", ["status", "--porcelain"], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    orchestratorStatus,
+  );
+  assert.equal(
+    execFileSync("git", ["rev-parse", "main"], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }).trim(),
+    mainCommit,
+  );
+  assert.match(
+    execFileSync("git", ["log", "-1", "--format=%s", result.branch], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    /^Snapshot /,
+  );
+  assert.equal(
+    execFileSync("git", ["show", `${result.branch}:worker-change.txt`], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    "preserved by snapshot\n",
+  );
+
+  execFileSync("git", ["worktree", "remove", "--force", worktreePath], {
+    cwd: workingDir,
+  });
+  worktreePath = undefined;
+  assert.equal(
+    execFileSync("git", ["show", `${result.branch}:worker-change.txt`], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    "preserved by snapshot\n",
+  );
+  assert.equal(
+    execFileSync("git", ["show", `${result.branch}:tracked.txt`], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    "orchestrator copy\n",
+  );
+  assert.throws(() =>
+    execFileSync("git", ["show", `${result.branch}:orchestrator-only.txt`], {
+      cwd: workingDir,
+      stdio: "ignore",
+    }),
+  );
 });
 
 test("job_result resolves a Delegation that outlives wait_seconds", async (t) => {
@@ -271,7 +433,7 @@ test("a fresh server lists a running Delegation after its originating server is 
     working_dir: workingDir,
     wait_seconds: 0,
   });
-  await first.terminate();
+  await first.close();
 
   const second = new McpClient({ cwd: repoRoot, env });
   t.after(async () => {
@@ -290,6 +452,7 @@ test("a fresh server lists a running Delegation after its originating server is 
   assert.equal(typeof jobs[0].pid, "number");
   assert.equal("controller_pid" in jobs[0], false);
   assert.equal("launch" in jobs[0], false);
+  assert.equal("isolation" in jobs[0], false);
   assert.equal(jobs[0].working_dir, workingDir);
   assert.equal(jobs[0].task_brief, taskBrief);
   assert.match(jobs[0].created_at, /^\d{4}-\d{2}-\d{2}T/);
@@ -460,7 +623,7 @@ test("a non-zero Worker exit mechanically records failed despite its output", as
     worker: "failing-fake",
     task_brief: "Exit non-zero.",
     working_dir: workingDir,
-    wait_seconds: 5,
+    wait_seconds: 15,
   });
 
   assert.equal(result.status, "failed");
@@ -546,6 +709,359 @@ test("job_cancel terminates a running Worker and persists canceled", async (t) =
   await assert.rejects(readFile(survivedPath, "utf8"));
 });
 
+
+
+test("canceling a worktree Delegation snapshots edits before returning", async (t) => {
+  const fixture = await mkdtemp(resolve(tmpdir(), "divisi-worktree-cancel-"));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "cancel-worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  let worktreePath;
+  let workerPid;
+  await mkdir(workingDir);
+  await writeFile(resolve(workingDir, "tracked.txt"), "baseline\n");
+  execFileSync("git", ["init", "-b", "main"], { cwd: workingDir });
+  execFileSync("git", ["add", "tracked.txt"], { cwd: workingDir });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Divisi Test",
+      "-c",
+      "user.email=divisi@example.invalid",
+      "commit",
+      "-m",
+      "fixture",
+    ],
+    { cwd: workingDir },
+  );
+  await writeFile(
+    workerPath,
+    [
+      'import { writeFile } from "node:fs/promises";',
+      'await writeFile("canceled-change.txt", "save me\\n");',
+      'process.stdout.write("ready to cancel\\n");',
+      "setInterval(() => {}, 1_000);",
+    ].join("\n"),
+  );
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "cancel-worktree-fake",
+          capability_summary: "A Worker that edits before cancellation.",
+          command: process.execPath,
+          args: [workerPath, "{task_brief}"],
+          output_dialect: "plain",
+        },
+      ],
+    }),
+  );
+  const client = new McpClient({
+    cwd: repoRoot,
+    env: {
+      DIVISI_WORKERS_FILE: registryPath,
+      LOCALAPPDATA: stateRoot,
+      XDG_STATE_HOME: stateRoot,
+    },
+  });
+  t.after(async () => {
+    if (workerPid) {
+      try {
+        process.kill(workerPid);
+      } catch {}
+    }
+    await client.close();
+    if (worktreePath) {
+      try {
+        execFileSync("git", ["worktree", "remove", "--force", worktreePath], {
+          cwd: workingDir,
+        });
+      } catch {}
+    }
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await client.initialize();
+  const pending = await client.callTool("delegate", {
+    worker: "cancel-worktree-fake",
+    task_brief: "Edit, then wait.",
+    working_dir: workingDir,
+    isolation: "worktree",
+    wait_seconds: 0,
+  });
+
+  let running;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    running = await client.callTool("job_status", pending);
+    if (running.recent_output.includes("ready to cancel")) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  worktreePath = running.working_dir;
+  workerPid = running.pid;
+
+  const canceled = await client.callTool("job_cancel", pending);
+  workerPid = undefined;
+
+  assert.equal(canceled.status, "canceled");
+  assert.equal(canceled.branch, running.branch);
+  assert.match(canceled.git_diff_stat, /canceled-change\.txt/);
+  assert.equal(
+    execFileSync("git", ["show", `${canceled.branch}:canceled-change.txt`], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    "save me\n",
+  );
+  assert.equal(
+    execFileSync("git", ["status", "--porcelain"], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    "",
+  );
+});
+
+
+test("a worktree Snapshot completes after the originating server exits", async (t) => {
+  const fixture = await mkdtemp(resolve(tmpdir(), "divisi-worktree-detached-"));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "detached-worktree-worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  let second;
+  let worktreePath;
+  await mkdir(workingDir);
+  await writeFile(resolve(workingDir, "tracked.txt"), "baseline\n");
+  execFileSync("git", ["init", "-b", "main"], { cwd: workingDir });
+  execFileSync("git", ["add", "tracked.txt"], { cwd: workingDir });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Divisi Test",
+      "-c",
+      "user.email=divisi@example.invalid",
+      "commit",
+      "-m",
+      "fixture",
+    ],
+    { cwd: workingDir },
+  );
+  await writeFile(
+    workerPath,
+    [
+      'import { writeFile } from "node:fs/promises";',
+      "await new Promise((resolve) => setTimeout(resolve, 250));",
+      'await writeFile("after-server-exit.txt", "controller preserved me\\n");',
+      "process.stdout.write(process.cwd());",
+    ].join("\n"),
+  );
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "detached-worktree-fake",
+          capability_summary: "A delayed worktree Worker.",
+          command: process.execPath,
+          args: [workerPath, "{task_brief}"],
+          output_dialect: "plain",
+        },
+      ],
+    }),
+  );
+  const env = {
+    DIVISI_WORKERS_FILE: registryPath,
+    LOCALAPPDATA: stateRoot,
+    XDG_STATE_HOME: stateRoot,
+  };
+  const first = new McpClient({ cwd: repoRoot, env });
+  t.after(async () => {
+    await first.close();
+    if (second) await second.close();
+    if (worktreePath) {
+      try {
+        execFileSync("git", ["worktree", "remove", "--force", worktreePath], {
+          cwd: workingDir,
+        });
+      } catch {}
+    }
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await first.initialize();
+  const pending = await first.callTool("delegate", {
+    worker: "detached-worktree-fake",
+    task_brief: "Finish after this MCP session.",
+    working_dir: workingDir,
+    isolation: "worktree",
+    wait_seconds: 0,
+  });
+  await first.close();
+
+  second = new McpClient({ cwd: repoRoot, env });
+  await second.initialize();
+  let result = pending;
+  for (let attempt = 0; attempt < 100 && !result.status; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    result = await second.callTool("job_result", pending);
+  }
+  worktreePath = result.final_message;
+
+  assert.equal(result.status, "completed");
+  assert.match(result.branch, /^divisi\/[0-9a-f-]+$/);
+  assert.match(result.git_diff_stat, /after-server-exit\.txt/);
+  assert.equal(
+    execFileSync("git", ["show", `${result.branch}:after-server-exit.txt`], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    "controller preserved me\n",
+  );
+  assert.equal(
+    execFileSync("git", ["status", "--porcelain"], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    "",
+  );
+});
+
+
+test("parallel worktree Delegations use distinct branches and directories", async (t) => {
+  const fixture = await mkdtemp(resolve(tmpdir(), "divisi-worktree-parallel-"));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "parallel-worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  const worktreePaths = [];
+  await mkdir(workingDir);
+  await writeFile(resolve(workingDir, "tracked.txt"), "baseline\n");
+  execFileSync("git", ["init", "-b", "main"], { cwd: workingDir });
+  execFileSync("git", ["add", "tracked.txt"], { cwd: workingDir });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Divisi Test",
+      "-c",
+      "user.email=divisi@example.invalid",
+      "commit",
+      "-m",
+      "fixture",
+    ],
+    { cwd: workingDir },
+  );
+  await writeFile(
+    workerPath,
+    [
+      'import { writeFile } from "node:fs/promises";',
+      "const name = process.argv[2];",
+      'await new Promise((resolve) => setTimeout(resolve, 150));',
+      'await writeFile(`${name}.txt`, `${name} branch\\n`);',
+      "process.stdout.write(process.cwd());",
+    ].join("\n"),
+  );
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "parallel-worktree-fake",
+          capability_summary: "A parallel worktree Worker.",
+          command: process.execPath,
+          args: [workerPath, "{task_brief}"],
+          output_dialect: "plain",
+        },
+      ],
+    }),
+  );
+  const client = new McpClient({
+    cwd: repoRoot,
+    env: {
+      DIVISI_WORKERS_FILE: registryPath,
+      LOCALAPPDATA: stateRoot,
+      XDG_STATE_HOME: stateRoot,
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    for (const path of worktreePaths) {
+      try {
+        execFileSync("git", ["worktree", "remove", "--force", path], {
+          cwd: workingDir,
+        });
+      } catch {}
+    }
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await client.initialize();
+
+  const pending = await Promise.all(
+    ["alpha", "beta"].map((taskBrief) =>
+      client.callTool("delegate", {
+        worker: "parallel-worktree-fake",
+        task_brief: taskBrief,
+        working_dir: workingDir,
+        isolation: "worktree",
+        wait_seconds: 0,
+      }),
+    ),
+  );
+  const results = await Promise.all(
+    pending.map(async (job) => {
+      let result = job;
+      for (let attempt = 0; attempt < 100 && !result.status; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        result = await client.callTool("job_result", job);
+      }
+      return result;
+    }),
+  );
+  worktreePaths.push(...results.map((result) => result.final_message));
+
+  assert.equal(new Set(results.map((result) => result.branch)).size, 2);
+  assert.equal(new Set(worktreePaths).size, 2);
+  assert.ok(
+    worktreePaths.every((path) =>
+      path.startsWith(`${resolve(stateRoot, "divisi", "worktrees")}${sep}`),
+    ),
+  );
+  assert.equal(
+    execFileSync("git", ["show", `${results[0].branch}:alpha.txt`], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    "alpha branch\n",
+  );
+  assert.equal(
+    execFileSync("git", ["show", `${results[1].branch}:beta.txt`], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    "beta branch\n",
+  );
+  assert.throws(() =>
+    execFileSync("git", ["show", `${results[0].branch}:beta.txt`], {
+      cwd: workingDir,
+      stdio: "ignore",
+    }),
+  );
+  assert.throws(() =>
+    execFileSync("git", ["show", `${results[1].branch}:alpha.txt`], {
+      cwd: workingDir,
+      stdio: "ignore",
+    }),
+  );
+  assert.equal(
+    execFileSync("git", ["status", "--porcelain"], {
+      cwd: workingDir,
+      encoding: "utf8",
+    }),
+    "",
+  );
+});
 async function startOptionWorker(
   t,
   { fixturePrefix, args, workerSource = "" },
@@ -607,7 +1123,7 @@ test("delegate maps a declared Worker option onto the Worker CLI argv", async (t
     task_brief: "Use medium effort.",
     working_dir: workingDir,
     options: { effort: "medium" },
-    wait_seconds: 5,
+    wait_seconds: 15,
   });
 
   assert.equal(result.status, "completed");
@@ -631,7 +1147,7 @@ test("delegate applies a declared Worker option default when options are omitted
     worker: "fake",
     task_brief: "Use the default.",
     working_dir: workingDir,
-    wait_seconds: 5,
+    wait_seconds: 15,
   });
 
   assert.equal(result.status, "completed");
@@ -676,6 +1192,26 @@ test("delegate rejects a Worker option value outside the registry allowlist", as
       wait_seconds: 5,
     }),
     /Unknown value for Worker option effort: maximum-overdrive/,
+  );
+  await assert.rejects(readdir(resolve(stateRoot, "divisi", "jobs")));
+});
+
+
+test("worktree isolation rejects a non-git working directory without launching", async (t) => {
+  const { client, stateRoot, workingDir } = await startOptionWorker(t, {
+    fixturePrefix: "divisi-worktree-non-git-",
+    args: [],
+  });
+
+  await assert.rejects(
+    client.callTool("delegate", {
+      worker: "fake",
+      task_brief: "Do not launch.",
+      working_dir: workingDir,
+      isolation: "worktree",
+      wait_seconds: 5,
+    }),
+    /requires a git repository with a commit/,
   );
   await assert.rejects(readdir(resolve(stateRoot, "divisi", "jobs")));
 });

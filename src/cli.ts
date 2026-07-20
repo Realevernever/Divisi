@@ -16,17 +16,27 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { delimiter, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  createDelegationWorktree,
+  gitChangeSummary,
+  snapshotWorktree,
+  type WorktreeJobFields,
+} from "./worktree.js";
 
 const tools = [
   {
     name: "delegate",
-    description: "Run an in-place Delegation through a registered Worker CLI.",
+    description: "Run a Delegation through a registered Worker CLI.",
     inputSchema: {
       type: "object",
       properties: {
         worker: { type: "string" },
         task_brief: { type: "string" },
         working_dir: { type: "string" },
+        isolation: {
+          type: "string",
+          enum: ["in_place", "worktree"],
+        },
         options: {
           type: "object",
           additionalProperties: { type: "string" },
@@ -158,6 +168,7 @@ type JobResult = {
   git_diff_stat: string;
   duration_ms: number;
   log_path: string;
+  branch?: string;
 };
 
 function registryWorkers(): Worker[] {
@@ -317,6 +328,9 @@ function publicJob(job: Record<string, unknown>): Record<string, unknown> {
     launch: _launch,
     controller_pid: _controllerPid,
     cancel_requested_at: _cancelRequestedAt,
+    base_commit: _baseCommit,
+    orchestrator_working_dir: _orchestratorWorkingDir,
+    worktree_path: _worktreePath,
     ...visible
   } = job;
   return visible;
@@ -366,13 +380,15 @@ const terminalStatuses = new Set([
 
 function toJobResult(job: Record<string, unknown>): JobResult | undefined {
   if (!terminalStatuses.has(String(job.status))) return undefined;
-  return {
+  const result: JobResult = {
     status: job.status as JobResult["status"],
     final_message: String(job.final_message ?? ""),
     git_diff_stat: String(job.git_diff_stat ?? ""),
     duration_ms: Number(job.duration_ms ?? 0),
     log_path: String(job.log_path),
   };
+  if (typeof job.branch === "string") result.branch = job.branch;
+  return result;
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -399,6 +415,7 @@ function gitDiffStat(workingDir: string): string {
     return "";
   }
 }
+
 
 function terminateWindowsTree(pid: number): void {
   execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
@@ -448,6 +465,7 @@ async function cancelJob(jobId: string): Promise<JobResult> {
   }
 
   const current = readJob(jobId);
+  snapshotWorktree(current as unknown as WorktreeJobFields);
   const finishedAt = new Date();
   const { launch: _launch, ...persistent } = current;
   writeJob(jobId, {
@@ -457,7 +475,7 @@ async function cancelJob(jobId: string): Promise<JobResult> {
     signal: process.platform === "win32" ? "taskkill" : "SIGTERM",
     finished_at: finishedAt.toISOString(),
     final_message: readLog(String(job.log_path)),
-    git_diff_stat: gitDiffStat(String(job.working_dir)),
+    git_diff_stat: gitChangeSummary(current as unknown as WorktreeJobFields),
     duration_ms: finishedAt.getTime() - Date.parse(String(job.started_at)),
   });
   return toJobResult(readJob(jobId)) as JobResult;
@@ -468,6 +486,7 @@ async function startDelegation(
   taskBrief: string,
   workingDir: string,
   requestedOptions: Record<string, string>,
+  requestedIsolation: string,
 ): Promise<{ jobId: string }> {
   const worker = registryWorkers().find(({ id }) => id === workerId);
   if (!worker) throw new Error(`Unknown Worker: ${workerId}`);
@@ -479,20 +498,8 @@ async function startDelegation(
     if (!Object.hasOwn(declaredOptions, name))
       throw new Error(`Unknown Worker option: ${name}`);
   }
-
-  const jobId = randomUUID();
-  const logsDirectory = join(userStateDirectory(), "logs");
-  mkdirSync(logsDirectory, { recursive: true });
-  const logPath = join(logsDirectory, `${jobId}.log`);
-  writeFileSync(logPath, "");
-  const createdAt = new Date().toISOString();
-  const args = [
-    ...worker.args.map((arg) =>
-      arg
-        .replaceAll("{task_brief}", taskBrief)
-        .replaceAll("{working_dir}", workingDir),
-    ),
-    ...Object.entries(declaredOptions).flatMap(([name, option]) => {
+  const optionArgs = Object.entries(declaredOptions).flatMap(
+    ([name, option]) => {
       const value = requestedOptions[name] ?? option.default;
       if (!option.values.includes(value))
         throw new Error(`Unknown value for Worker option ${name}: ${value}`);
@@ -500,15 +507,45 @@ async function startDelegation(
         .trim()
         .split(/\s+/)
         .map((arg) => arg.replaceAll("{value}", value));
-    }),
+    },
+  );
+  if (requestedIsolation !== "in_place" && requestedIsolation !== "worktree") {
+    throw new Error(`Unknown isolation: ${requestedIsolation}`);
+  }
+
+  const jobId = randomUUID();
+  const worktree =
+    requestedIsolation === "worktree"
+      ? createDelegationWorktree(workingDir, jobId, userStateDirectory())
+      : undefined;
+  const delegationWorkingDir = worktree?.workingDir ?? resolve(workingDir);
+  const args = [
+    ...worker.args.map((arg) =>
+      arg
+        .replaceAll("{task_brief}", taskBrief)
+        .replaceAll("{working_dir}", delegationWorkingDir),
+    ),
+    ...optionArgs,
   ];
+  const logsDirectory = join(userStateDirectory(), "logs");
+  mkdirSync(logsDirectory, { recursive: true });
+  const logPath = join(logsDirectory, `${jobId}.log`);
+  writeFileSync(logPath, "");
+  const createdAt = new Date().toISOString();
   writeJob(jobId, {
     job_id: jobId,
     worker: workerId,
     status: "starting",
     pid: null,
     controller_pid: null,
-    working_dir: workingDir,
+    working_dir: delegationWorkingDir,
+    ...(worktree && {
+      isolation: "worktree",
+      branch: worktree.branch,
+      base_commit: worktree.baseCommit,
+      orchestrator_working_dir: worktree.repoRoot,
+      worktree_path: worktree.worktreePath,
+    }),
     task_brief: taskBrief,
     created_at: createdAt,
     started_at: createdAt,
@@ -552,6 +589,9 @@ async function waitForResult(
 }
 function serve(): void {
   const input = createInterface({ input: process.stdin });
+  input.on("close", () => {
+    process.exit(0);
+  });
   input.on("line", async (line) => {
     let request: JsonRpcRequest;
     try {
@@ -588,6 +628,9 @@ function serve(): void {
             String(args.task_brief),
             String(args.working_dir),
             (args.options ?? {}) as Record<string, string>,
+            args.isolation === undefined
+              ? "in_place"
+              : String(args.isolation),
           );
           const result = await waitForResult(
             jobId,

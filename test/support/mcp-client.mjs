@@ -76,6 +76,18 @@ export class McpClient {
     if (this.#child.exitCode !== null) return;
     const exited = once(this.#child, "exit");
     this.#child.stdin.end();
+    const graceful = Symbol("graceful");
+    let timer;
+    const outcome = await Promise.race([
+      exited.then(() => graceful),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, 1_000);
+        timer.unref();
+      }),
+    ]);
+    clearTimeout(timer);
+    if (outcome === graceful) return;
+    this.#child.kill();
     await exited;
   }
 

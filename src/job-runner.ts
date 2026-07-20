@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   closeSync,
   openSync,
@@ -7,19 +7,22 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import {
+  gitChangeSummary,
+  snapshotWorktree,
+  type WorktreeJobFields,
+} from "./worktree.js";
 
 type LaunchRecord = {
   command: string;
   args: string[];
 };
 
-type JobRecord = {
-  job_id: string;
+type JobRecord = WorktreeJobFields & {
   worker: string;
   status: "starting" | "running" | "completed" | "failed" | "timeout" | "canceled";
   pid: number | null;
   controller_pid: number | null;
-  working_dir: string;
   task_brief: string;
   created_at: string;
   started_at: string;
@@ -51,18 +54,6 @@ function writeJob(job: JobRecord): void {
   renameSync(temporaryPath, jobPath);
 }
 
-function gitDiffStat(workingDir: string): string {
-  try {
-    return execFileSync("git", ["diff", "--stat", "--no-ext-diff"], {
-      cwd: workingDir,
-      encoding: "utf8",
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-  } catch {
-    return "";
-  }
-}
 
 function finish(
   running: JobRecord,
@@ -76,6 +67,7 @@ function finish(
     current.status === "timeout" ||
     current.cancel_requested_at
   ) return;
+  snapshotWorktree(running);
   const finishedAt = new Date();
   const { launch: _launch, ...publicRecord } = running;
   writeJob({
@@ -85,7 +77,7 @@ function finish(
     signal,
     finished_at: finishedAt.toISOString(),
     final_message: readFileSync(running.log_path, "utf8"),
-    git_diff_stat: gitDiffStat(running.working_dir),
+    git_diff_stat: gitChangeSummary(running),
     duration_ms: finishedAt.getTime() - Date.parse(running.started_at),
   });
 }
