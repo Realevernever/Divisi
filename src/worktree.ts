@@ -21,6 +21,19 @@ export type WorktreeSetup = {
   workingDir: string;
 };
 
+export type WorktreeCleanupResult = {
+  job_id: string;
+  worktree_removed: boolean;
+  branch: string;
+  branch_deleted: boolean;
+};
+
+type WorktreeCleanupTarget = {
+  branch: string;
+  repoRoot: string;
+  expectedWorktreePath: string;
+};
+
 function oneLine(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
@@ -32,6 +45,13 @@ function gitOutput(cwd: string, args: string[]): string {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+}
+
+function repositoryKey(repoRoot: string): string {
+  return createHash("sha256")
+    .update(process.platform === "win32" ? repoRoot.toLowerCase() : repoRoot)
+    .digest("hex")
+    .slice(0, 16);
 }
 
 export function createDelegationWorktree(
@@ -63,12 +83,9 @@ export function createDelegationWorktree(
       `Working directory is outside its git repository: ${resolvedWorkingDir}`,
     );
   }
-  const repositoryKey = createHash("sha256")
-    .update(process.platform === "win32" ? repoRoot.toLowerCase() : repoRoot)
-    .digest("hex")
-    .slice(0, 16);
+  const key = repositoryKey(repoRoot);
   const branch = `divisi/${jobId}`;
-  const worktreesDirectory = join(stateDirectory, "worktrees", repositoryKey);
+  const worktreesDirectory = join(stateDirectory, "worktrees", key);
   const worktreePath = join(worktreesDirectory, jobId);
   try {
     statSync(worktreePath);
@@ -168,4 +185,128 @@ export function gitChangeSummary(job: WorktreeJobFields): string {
   } catch {
     return "";
   }
+}
+
+function isMissingPath(path: string): boolean {
+  try {
+    statSync(path);
+    return false;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return true;
+    }
+    throw error;
+  }
+}
+
+export function validateWorktreeCleanup(
+  job: WorktreeJobFields,
+  stateDirectory: string,
+): WorktreeCleanupTarget {
+  if (job.isolation !== "worktree") {
+    throw new Error(`Job has no Worktree Delegation: ${job.job_id}`);
+  }
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      job.job_id,
+    )
+  ) {
+    throw new Error("Refusing cleanup for an invalid job id");
+  }
+  const branch = `divisi/${job.job_id}`;
+  if (job.branch !== branch) {
+    throw new Error(
+      `Refusing cleanup outside branch namespace: ${String(job.branch)}`,
+    );
+  }
+  if (!job.orchestrator_working_dir || !job.worktree_path) {
+    throw new Error(`Job is missing Worktree cleanup metadata: ${job.job_id}`);
+  }
+  const repoRoot = resolve(job.orchestrator_working_dir);
+  let actualRepoRoot: string;
+  try {
+    actualRepoRoot = resolve(
+      gitOutput(repoRoot, ["rev-parse", "--show-toplevel"]),
+    );
+  } catch {
+    throw new Error(
+      `Refusing cleanup for an unavailable repository: ${repoRoot}`,
+    );
+  }
+  if (actualRepoRoot !== repoRoot) {
+    throw new Error(
+      `Refusing cleanup outside the recorded repository: ${repoRoot}`,
+    );
+  }
+  const expectedWorktreePath = resolve(
+    stateDirectory,
+    "worktrees",
+    repositoryKey(repoRoot),
+    job.job_id,
+  );
+  if (resolve(job.worktree_path) !== expectedWorktreePath) {
+    throw new Error(
+      `Refusing cleanup outside the Divisi state root: ${job.worktree_path}`,
+    );
+  }
+  return {
+    branch,
+    repoRoot,
+    expectedWorktreePath,
+  };
+}
+
+export function cleanupWorktree(
+  job: WorktreeJobFields,
+  stateDirectory: string,
+  discard: boolean,
+): WorktreeCleanupResult {
+  const { branch, repoRoot, expectedWorktreePath } =
+    validateWorktreeCleanup(job, stateDirectory);
+  const worktreeRemoved = !isMissingPath(expectedWorktreePath);
+  if (worktreeRemoved) {
+    execFileSync("git", ["worktree", "remove", "--force", expectedWorktreePath], {
+      cwd: repoRoot,
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } else {
+    execFileSync("git", ["worktree", "prune"], {
+      cwd: repoRoot,
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  }
+
+  const branchExists =
+    spawnSync(
+      "git",
+      ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+      { cwd: repoRoot, windowsHide: true, stdio: "ignore" },
+    ).status === 0;
+  const merged =
+    branchExists &&
+    spawnSync("git", ["merge-base", "--is-ancestor", branch, "HEAD"], {
+      cwd: repoRoot,
+      windowsHide: true,
+      stdio: "ignore",
+    }).status === 0;
+  const branchDeleted = branchExists && (merged || discard);
+  if (branchDeleted) {
+    execFileSync("git", ["branch", discard ? "-D" : "-d", "--", branch], {
+      cwd: repoRoot,
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  }
+  return {
+    job_id: job.job_id,
+    worktree_removed: worktreeRemoved,
+    branch,
+    branch_deleted: branchDeleted,
+  };
 }

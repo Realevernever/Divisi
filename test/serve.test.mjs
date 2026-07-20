@@ -32,6 +32,7 @@ test("an MCP client discovers the tracer-bullet tools", async (t) => {
       "job_result",
       "job_list",
       "job_cancel",
+      "job_cleanup",
       "list_workers",
     ],
   );

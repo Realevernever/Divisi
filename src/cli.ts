@@ -16,11 +16,13 @@ import { homedir } from "node:os";
 import { delimiter, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  cleanupWorktree,
   createDelegationWorktree,
   gitChangeSummary,
   snapshotWorktree,
   type WorktreeJobFields,
 } from "./worktree.js";
+import { deepClean, retentionSweep } from "./cleanup.js";
 import { replaceFileSync } from "./atomic-file.js";
 import {
   parseCompletedOutput,
@@ -88,6 +90,23 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: { job_id: { type: "string" } },
+      required: ["job_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "job_cleanup",
+    description:
+      "Remove a finished Delegation worktree and safely retire its branch.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        job_id: { type: "string" },
+        discard: {
+          type: "boolean",
+          description: "Explicitly delete the unmerged job branch.",
+        },
+      },
       required: ["job_id"],
       additionalProperties: false,
     },
@@ -347,6 +366,13 @@ function publicJob(job: Record<string, unknown>): Record<string, unknown> {
 
 
 function readJob(jobId: string): Record<string, unknown> {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      jobId,
+    )
+  ) {
+    throw new Error("Refusing access for an invalid job id");
+  }
   try {
     return JSON.parse(
       readFileSync(join(userStateDirectory(), "jobs", `${jobId}.json`), "utf8"),
@@ -489,6 +515,18 @@ async function cancelJob(jobId: string): Promise<JobResult> {
     duration_ms: finishedAt.getTime() - Date.parse(String(job.started_at)),
   });
   return toJobResult(readJob(jobId)) as JobResult;
+}
+
+function cleanupJob(jobId: string, discard: boolean): unknown {
+  const job = readJob(jobId);
+  if (!terminalStatuses.has(String(job.status))) {
+    throw new Error(`Refusing to clean running job: ${jobId}`);
+  }
+  return cleanupWorktree(
+    job as unknown as WorktreeJobFields,
+    userStateDirectory(),
+    discard,
+  );
 }
 
 async function startDelegation(
@@ -635,6 +673,7 @@ async function waitForResult(
   return toJobResult(readJob(jobId));
 }
 function serve(): void {
+  retentionSweep(userStateDirectory());
   const input = createInterface({ input: process.stdin });
   input.on("close", () => {
     process.exit(0);
@@ -740,6 +779,23 @@ function serve(): void {
         }
         return;
       }
+      if (params.name === "job_cleanup") {
+        const args = (request.params as { arguments?: Record<string, unknown> })
+          .arguments ?? {};
+        try {
+          respond(
+            requestId,
+            toolResult(cleanupJob(String(args.job_id), args.discard === true)),
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          respond(requestId, {
+            isError: true,
+            ...toolResult({ error: message }),
+          });
+        }
+        return;
+      }
       if (params.name === "job_list") {
         respond(requestId, toolResult(listJobs()));
         return;
@@ -762,11 +818,85 @@ function serve(): void {
   });
 }
 
+async function cleanCommand(args: string[]): Promise<number> {
+  const allowed = new Set(["--yes", "--drop-unmerged"]);
+  const unknown = args.find((arg) => !allowed.has(arg));
+  if (unknown) {
+    process.stderr.write(`Unknown clean option: ${unknown}\n`);
+    return 1;
+  }
+  const dropUnmerged = args.includes("--drop-unmerged");
+  let confirmed = args.includes("--yes");
+  const stateDirectory = userStateDirectory();
+  const items = deepClean(stateDirectory, {
+    apply: false,
+    dropUnmerged,
+  });
+  if (items.length === 0) {
+    process.stdout.write("No reclaimable items.\n");
+  } else {
+    process.stdout.write(`${items.join("\n")}\n`);
+  }
+
+  if (!confirmed && process.stdin.isTTY) {
+    const prompt = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    try {
+      const answer = await new Promise<string>((resolveAnswer) => {
+        prompt.question("Apply safe cleanup? [y/N] ", resolveAnswer);
+      });
+      confirmed = /^(?:y|yes)$/i.test(answer.trim());
+    } finally {
+      prompt.close();
+    }
+  } else if (!confirmed) {
+    process.stdout.write("Apply safe cleanup? [y/N] ");
+    const answer = readFileSync(0, "utf8");
+    confirmed = /^(?:y|yes)$/i.test(answer.trim());
+    process.stdout.write("\n");
+  }
+  if (!confirmed) {
+    process.stdout.write(
+      "Dry run: no changes made. Pass --yes to confirm cleanup.\n",
+    );
+    return 0;
+  }
+
+  try {
+    deepClean(stateDirectory, {
+      apply: true,
+      dropUnmerged,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Cleanup refused: ${message}\n`);
+    return 1;
+  }
+  process.stdout.write(
+    dropUnmerged
+      ? "Cleanup complete; unmerged branches were explicitly eligible.\n"
+      : "Cleanup complete; unmerged branches were preserved.\n",
+  );
+  return 0;
+}
+
 if (process.argv[2] === "serve") {
-  serve();
+  try {
+    serve();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Could not start Divisi: ${message}\n`);
+    process.exitCode = 1;
+  }
 } else if (process.argv[2] === "doctor") {
   process.exitCode = doctor();
+} else if (process.argv[2] === "clean") {
+  cleanCommand(process.argv.slice(3)).then((code) => {
+    process.exitCode = code;
+  });
 } else {
-  process.stderr.write("Usage: divisi <serve|doctor>\n");
+  process.stderr.write("Usage: divisi <serve|doctor|clean>\n");
   process.exitCode = 1;
 }

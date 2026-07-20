@@ -7,7 +7,9 @@
     "divisi": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "docs/cleanup.md",
+    "docs/worker-registry.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
