@@ -30,6 +30,7 @@ import {
   type OutputDialect,
   type Usage,
 } from "./output-dialect.js";
+import { initCommand, snippetCommand } from "./installer.js";
 
 const tools = [
   {
@@ -896,7 +897,25 @@ if (process.argv[2] === "serve") {
   cleanCommand(process.argv.slice(3)).then((code) => {
     process.exitCode = code;
   });
+} else if (process.argv[2] === "init") {
+  initCommand(process.argv.slice(3))
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`Could not initialize Divisi: ${message}\n`);
+      process.exitCode = 1;
+    });
+} else if (process.argv[2] === "snippet") {
+  try {
+    process.exitCode = snippetCommand(process.argv.slice(3));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Could not apply Divisi snippet: ${message}\n`);
+    process.exitCode = 1;
+  }
 } else {
-  process.stderr.write("Usage: divisi <serve|doctor|clean>\n");
+  process.stderr.write("Usage: divisi <serve|init|snippet|doctor|clean>\n");
   process.exitCode = 1;
 }

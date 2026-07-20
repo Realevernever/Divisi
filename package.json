@@ -9,7 +9,10 @@
   "files": [
     "dist",
     "docs/cleanup.md",
-    "docs/worker-registry.md"
+    "docs/installer.md",
+    "docs/worker-registry.md",
+    "skills",
+    "snippets"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
