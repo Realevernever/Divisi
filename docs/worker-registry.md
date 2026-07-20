@@ -15,6 +15,39 @@ Worker entries may also declare:
 - `version_args`: arguments used by `divisi doctor` to read the CLI version;
   when omitted, Divisi uses `["--version"]`
 
+## Output dialects
+
+`output_dialect` is either `plain` or `jsonl-events`. `plain` keeps the existing
+contract: the complete log is the final message and `job_status.recent_output`
+is its raw 16 KiB tail.
+
+`jsonl-events` is a vendor-neutral UTF-8 JSON Lines contract. Each complete line
+is one object with one of these shapes:
+
+- `{ "type": "progress", "message": string }` reports progress.
+- `{ "type": "message", "message": string, "terminal": boolean }` reports
+  Worker text. The last event with `terminal: true` supplies `final_message`
+  verbatim. With no terminal message, `final_message` is the empty string.
+- `{ "type": "usage", ...facts }` reports any explicitly observed usage facts:
+  `input_tokens`, `output_tokens`, and `total_tokens` are non-negative integers;
+  `cost_usd` is a non-negative finite number.
+
+Usage facts are optional. The latest valid value for each explicitly present
+field wins, including zero. Divisi never sums, derives, or estimates them.
+A Job result contains `usage` only when at least one valid fact was emitted.
+
+While a job runs, `job_status.recent_output` contains the exact JSON source
+lines for the latest recognized complete events, joined with newlines. It is
+bounded to 20 events and 16 KiB of whole events, parsed from at most the latest
+256 KiB of the log; an in-progress partial line is withheld. When the process
+has ended, a valid final event is accepted even without a trailing newline.
+
+Malformed JSON, unknown event types, and invalid fields are skipped. Their
+original bytes remain in the raw log at `log_path`; they never change the
+process-derived status, become a final message, or create usage facts. This
+small contract is shared by every Worker entry; vendor-specific branches do not
+belong in the parser.
+
 ### Doctor output
 
 `divisi doctor` prints one tab-separated row per Worker:

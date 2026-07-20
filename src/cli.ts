@@ -7,7 +7,6 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -22,6 +21,13 @@ import {
   snapshotWorktree,
   type WorktreeJobFields,
 } from "./worktree.js";
+import { replaceFileSync } from "./atomic-file.js";
+import {
+  parseCompletedOutput,
+  readRecentOutput,
+  type OutputDialect,
+  type Usage,
+} from "./output-dialect.js";
 
 const tools = [
   {
@@ -131,7 +137,7 @@ type Worker = {
   capability_summary: string;
   command: string;
   args: string[];
-  output_dialect: "plain";
+  output_dialect: OutputDialect;
   required_env?: string[];
   version_args?: string[];
   options?: Record<string, WorkerOption>;
@@ -168,6 +174,7 @@ type JobResult = {
   git_diff_stat: string;
   duration_ms: number;
   log_path: string;
+  usage?: Usage;
   branch?: string;
 };
 
@@ -309,7 +316,7 @@ function writeJob(jobId: string, value: unknown): void {
     `.${jobId}.${process.pid}.${randomUUID()}.tmp`,
   );
   writeFileSync(temporaryPath, JSON.stringify(value));
-  renameSync(temporaryPath, jobPath);
+  replaceFileSync(temporaryPath, jobPath);
 }
 
 function listJobs(): unknown[] {
@@ -328,6 +335,7 @@ function publicJob(job: Record<string, unknown>): Record<string, unknown> {
     launch: _launch,
     controller_pid: _controllerPid,
     cancel_requested_at: _cancelRequestedAt,
+    output_dialect: _outputDialect,
     base_commit: _baseCommit,
     orchestrator_working_dir: _orchestratorWorkingDir,
     worktree_path: _worktreePath,
@@ -364,12 +372,13 @@ function isProcessAlive(pid: number): boolean {
 function jobStatus(jobId: string): Record<string, unknown> {
   const job = readJob(jobId);
   const logPath = String(job.log_path);
-  let output = "";
-  try {
-    output = readFileSync(logPath, "utf8");
-  } catch {}
+  const dialect = (job.output_dialect as OutputDialect | undefined) ?? "plain";
   const alive = job.status === "running" && isProcessAlive(Number(job.pid));
-  return { ...publicJob(job), alive, recent_output: output.slice(-16_384) };
+  return {
+    ...publicJob(job),
+    alive,
+    recent_output: readRecentOutput(logPath, dialect),
+  };
 }
 const terminalStatuses = new Set([
   "completed",
@@ -388,6 +397,9 @@ function toJobResult(job: Record<string, unknown>): JobResult | undefined {
     log_path: String(job.log_path),
   };
   if (typeof job.branch === "string") result.branch = job.branch;
+  if (typeof job.usage === "object" && job.usage !== null) {
+    result.usage = job.usage as Usage;
+  }
   return result;
 }
 
@@ -395,13 +407,6 @@ function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function readLog(logPath: string): string {
-  try {
-    return readFileSync(logPath, "utf8");
-  } catch {
-    return "";
-  }
-}
 
 function gitDiffStat(workingDir: string): string {
   try {
@@ -468,13 +473,18 @@ async function cancelJob(jobId: string): Promise<JobResult> {
   snapshotWorktree(current as unknown as WorktreeJobFields);
   const finishedAt = new Date();
   const { launch: _launch, ...persistent } = current;
+  const parsedOutput = parseCompletedOutput(
+    String(job.log_path),
+    (job.output_dialect as OutputDialect | undefined) ?? "plain",
+  );
   writeJob(jobId, {
     ...persistent,
     status: "canceled",
     exit_code: null,
     signal: process.platform === "win32" ? "taskkill" : "SIGTERM",
     finished_at: finishedAt.toISOString(),
-    final_message: readLog(String(job.log_path)),
+    final_message: parsedOutput.finalMessage,
+    ...(parsedOutput.usage && { usage: parsedOutput.usage }),
     git_diff_stat: gitChangeSummary(current as unknown as WorktreeJobFields),
     duration_ms: finishedAt.getTime() - Date.parse(String(job.started_at)),
   });
@@ -490,7 +500,10 @@ async function startDelegation(
 ): Promise<{ jobId: string }> {
   const worker = registryWorkers().find(({ id }) => id === workerId);
   if (!worker) throw new Error(`Unknown Worker: ${workerId}`);
-  if (worker.output_dialect !== "plain") {
+  if (
+    worker.output_dialect !== "plain" &&
+    worker.output_dialect !== "jsonl-events"
+  ) {
     throw new Error(`Unsupported Output dialect: ${worker.output_dialect}`);
   }
   const declaredOptions = worker.options ?? {};
@@ -550,27 +563,61 @@ async function startDelegation(
     created_at: createdAt,
     started_at: createdAt,
     log_path: logPath,
+    output_dialect: worker.output_dialect,
     launch: { command: worker.command, args },
   });
 
   const jobPath = join(userStateDirectory(), "jobs", `${jobId}.json`);
   const runnerPath = fileURLToPath(new URL("./job-runner.js", import.meta.url));
-  const controller = spawn(process.execPath, [runnerPath, jobPath], {
-    detached: true,
-    windowsHide: true,
-    stdio: "ignore",
-  });
-  controller.unref();
+  let controllerAttempts = 0;
+  let controllerStderr = "";
+  const launchController = () => {
+    controllerAttempts += 1;
+    controllerStderr = "";
+    const launched = spawn(process.execPath, [runnerPath, jobPath], {
+      detached: true,
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    launched.stderr?.setEncoding("utf8");
+    launched.stderr?.on("data", (chunk: string) => {
+      controllerStderr = `${controllerStderr}${chunk}`.slice(-4_096);
+    });
+    launched.unref();
+    return launched;
+  };
+  let controller = launchController();
 
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     const job = readJob(jobId);
-    if (job.status !== "starting") return { jobId };
+    if (job.status !== "starting" && job.status !== "launching") {
+      controller.stderr?.destroy();
+      return { jobId };
+    }
     if (controller.exitCode !== null) {
-      throw new Error(`Job controller exited before starting Worker: ${jobId}`);
+      const settledJob = readJob(jobId);
+      if (
+        settledJob.status !== "starting" &&
+        settledJob.status !== "launching"
+      ) {
+        controller.stderr?.destroy();
+        return { jobId };
+      }
+      if (settledJob.status === "starting" && controllerAttempts < 3) {
+        await sleep(25 * controllerAttempts);
+        controller = launchController();
+        continue;
+      }
+      throw new Error(
+        `Job controller exited before starting Worker: ${jobId} (exit ${controller.exitCode}): ${controllerStderr
+          .trim()
+          .replace(/\s+/g, " ") || "no controller diagnostic"}`,
+      );
     }
     await sleep(10);
   }
+  controller.stderr?.destroy();
   throw new Error(`Timed out starting Worker: ${jobId}`);
 }
 

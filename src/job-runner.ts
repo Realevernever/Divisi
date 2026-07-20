@@ -3,7 +3,6 @@ import {
   closeSync,
   openSync,
   readFileSync,
-  renameSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -12,6 +11,12 @@ import {
   snapshotWorktree,
   type WorktreeJobFields,
 } from "./worktree.js";
+import { replaceFileSync } from "./atomic-file.js";
+import {
+  parseCompletedOutput,
+  type OutputDialect,
+  type Usage,
+} from "./output-dialect.js";
 
 type LaunchRecord = {
   command: string;
@@ -20,7 +25,15 @@ type LaunchRecord = {
 
 type JobRecord = WorktreeJobFields & {
   worker: string;
-  status: "starting" | "running" | "completed" | "failed" | "timeout" | "canceled";
+  output_dialect?: OutputDialect;
+  status:
+    | "starting"
+    | "launching"
+    | "running"
+    | "completed"
+    | "failed"
+    | "timeout"
+    | "canceled";
   pid: number | null;
   controller_pid: number | null;
   task_brief: string;
@@ -34,6 +47,7 @@ type JobRecord = WorktreeJobFields & {
   signal?: string | null;
   final_message?: string;
   git_diff_stat?: string;
+  usage?: Usage;
   duration_ms?: number;
 };
 
@@ -51,7 +65,7 @@ function writeJob(job: JobRecord): void {
     `.${job.job_id}.${process.pid}.tmp`,
   );
   writeFileSync(temporaryPath, JSON.stringify(job));
-  renameSync(temporaryPath, jobPath);
+  replaceFileSync(temporaryPath, jobPath);
 }
 
 
@@ -70,37 +84,49 @@ function finish(
   snapshotWorktree(running);
   const finishedAt = new Date();
   const { launch: _launch, ...publicRecord } = running;
+  const parsedOutput = parseCompletedOutput(
+    running.log_path,
+    running.output_dialect ?? "plain",
+  );
   writeJob({
     ...publicRecord,
     status,
     exit_code: exitCode,
     signal,
     finished_at: finishedAt.toISOString(),
-    final_message: readFileSync(running.log_path, "utf8"),
+    final_message: parsedOutput.finalMessage,
+    ...(parsedOutput.usage && { usage: parsedOutput.usage }),
     git_diff_stat: gitChangeSummary(running),
     duration_ms: finishedAt.getTime() - Date.parse(running.started_at),
   });
 }
 
 const initial = readJob();
-if (!initial.launch) throw new Error("Job launch record is missing");
-const logFile = openSync(initial.log_path, "a");
+const launch = initial.launch;
+if (!launch) throw new Error("Job launch record is missing");
+const claimed: JobRecord = {
+  ...initial,
+  status: "launching",
+  controller_pid: process.pid,
+};
+writeJob(claimed);
+const logFile = openSync(claimed.log_path, "a");
 let child;
 try {
-  child = spawn(initial.launch.command, initial.launch.args, {
-    cwd: initial.working_dir,
+  child = spawn(launch.command, launch.args, {
+    cwd: claimed.working_dir,
     windowsHide: true,
     stdio: ["ignore", logFile, logFile],
   });
 } catch {
   closeSync(logFile);
-  finish(initial, "failed", null, null);
+  finish(claimed, "failed", null, null);
   process.exit(1);
 }
 closeSync(logFile);
 
 const running: JobRecord = {
-  ...initial,
+  ...claimed,
   status: "running",
   pid: child.pid ?? null,
   controller_pid: process.pid,

@@ -1215,3 +1215,384 @@ test("worktree isolation rejects a non-git working directory without launching",
   );
   await assert.rejects(readdir(resolve(stateRoot, "divisi", "jobs")));
 });
+
+test("jsonl-events returns the terminal message event verbatim", async (t) => {
+  const fixture = await mkdtemp(resolve(tmpdir(), "divisi-jsonl-result-"));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "jsonl-worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  await mkdir(workingDir);
+  await writeFile(
+    workerPath,
+    [
+      'process.stdout.write(JSON.stringify({ type: "progress", message: "still working" }) + "\\n");',
+      'process.stdout.write(JSON.stringify({ type: "message", message: "final Worker words\\nverbatim", terminal: true }) + "\\n");',
+    ].join("\n"),
+  );
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "jsonl-fake",
+          capability_summary: "A scripted structured-output Worker.",
+          command: process.execPath,
+          args: [workerPath, "{task_brief}"],
+          output_dialect: "jsonl-events",
+        },
+      ],
+    }),
+  );
+  const client = new McpClient({
+    cwd: repoRoot,
+    env: {
+      DIVISI_WORKERS_FILE: registryPath,
+      LOCALAPPDATA: stateRoot,
+      XDG_STATE_HOME: stateRoot,
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await client.initialize();
+
+  const result = await client.callTool("delegate", {
+    worker: "jsonl-fake",
+    task_brief: "Return structured output.",
+    working_dir: workingDir,
+    wait_seconds: 15,
+  });
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(Object.keys(result).sort(), [
+    "duration_ms", "final_message", "git_diff_stat", "log_path", "status",
+  ]);
+  assert.equal(result.final_message, "final Worker words\nverbatim");
+});
+
+test("jsonl-events surfaces explicit usage facts", async (t) => {
+  const fixture = await mkdtemp(resolve(tmpdir(), "divisi-jsonl-usage-"));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "jsonl-worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  await mkdir(workingDir);
+  await writeFile(
+    workerPath,
+    [
+      'process.stdout.write(JSON.stringify({ type: "usage", input_tokens: 120, output_tokens: 8, total_tokens: 128, cost_usd: 0.0042 }) + "\\n");',
+      'process.stdout.write(JSON.stringify({ type: "message", message: "done", terminal: true }) + "\\n");',
+    ].join("\n"),
+  );
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "jsonl-fake",
+          capability_summary: "A scripted structured-output Worker.",
+          command: process.execPath,
+          args: [workerPath, "{task_brief}"],
+          output_dialect: "jsonl-events",
+        },
+      ],
+    }),
+  );
+  const client = new McpClient({
+    cwd: repoRoot,
+    env: {
+      DIVISI_WORKERS_FILE: registryPath,
+      LOCALAPPDATA: stateRoot,
+      XDG_STATE_HOME: stateRoot,
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await client.initialize();
+
+  const result = await client.callTool("delegate", {
+    worker: "jsonl-fake",
+    task_brief: "Report observed usage.",
+    working_dir: workingDir,
+    wait_seconds: 15,
+  });
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(Object.keys(result).sort(), [
+    "duration_ms", "final_message", "git_diff_stat", "log_path", "status", "usage",
+  ]);
+  assert.deepEqual(result.usage, {
+    input_tokens: 120,
+    output_tokens: 8,
+    total_tokens: 128,
+    cost_usd: 0.0042,
+  });
+});
+
+test("jsonl-events job_status returns complete recent events", async (t) => {
+  const fixture = await mkdtemp(resolve(tmpdir(), "divisi-jsonl-status-"));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "jsonl-worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  const events = [
+    JSON.stringify({ type: "progress", message: "first structured step" }),
+    JSON.stringify({ type: "progress", message: "second structured step" }),
+  ];
+  const emitted = `${events[0]}\n{ malformed while running\n${events[1]}\n`;
+  await mkdir(workingDir);
+  await writeFile(
+    workerPath,
+    [
+      `process.stdout.write(${JSON.stringify(emitted)});`,
+      "await new Promise((resolve) => setTimeout(resolve, 1_500));",
+    ].join("\n"),
+  );
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "jsonl-fake",
+          capability_summary: "A scripted structured-output Worker.",
+          command: process.execPath,
+          args: [workerPath, "{task_brief}"],
+          output_dialect: "jsonl-events",
+        },
+      ],
+    }),
+  );
+  const client = new McpClient({
+    cwd: repoRoot,
+    env: {
+      DIVISI_WORKERS_FILE: registryPath,
+      LOCALAPPDATA: stateRoot,
+      XDG_STATE_HOME: stateRoot,
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await client.initialize();
+
+  const pending = await client.callTool("delegate", {
+    worker: "jsonl-fake",
+    task_brief: "Report structured progress.",
+    working_dir: workingDir,
+    wait_seconds: 0,
+  });
+  let status;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    status = await client.callTool("job_status", pending);
+    if (status.recent_output.includes("second structured step")) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  assert.equal(status.status, "running");
+  assert.equal(status.alive, true);
+  assert.equal(status.recent_output, events.join("\n"));
+});
+
+test("instant JSONL Delegations survive concurrent controller handshakes", async (t) => {
+  const fixture = await mkdtemp(resolve(tmpdir(), "divisi-jsonl-handshake-"));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "instant-worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  await mkdir(workingDir);
+  await writeFile(
+    workerPath,
+    [
+      'import { appendFile } from "node:fs/promises";',
+      'const index = process.argv[2].match(/\\d+/)[0];',
+      'await appendFile(`side-effect-${index}.txt`, "once\\n");',
+      'process.stdout.write(JSON.stringify({ type: "message", message: "instant", terminal: true }) + "\\n");',
+    ].join("\n"),
+  );
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "instant-jsonl-fake",
+          capability_summary: "An instant structured-output Worker.",
+          command: process.execPath,
+          args: [workerPath, "{task_brief}"],
+          output_dialect: "jsonl-events",
+        },
+      ],
+    }),
+  );
+  const client = new McpClient({
+    cwd: repoRoot,
+    env: {
+      DIVISI_WORKERS_FILE: registryPath,
+      LOCALAPPDATA: stateRoot,
+      XDG_STATE_HOME: stateRoot,
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await client.initialize();
+
+  const pending = await Promise.all(
+    Array.from({ length: 12 }, (_, index) =>
+      client.callTool("delegate", {
+        worker: "instant-jsonl-fake",
+        task_brief: `Instant task ${index}.`,
+        working_dir: workingDir,
+        wait_seconds: 0,
+      }),
+    ),
+  );
+  let results = pending;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    results = await Promise.all(
+      pending.map(({ job_id }) =>
+        client.callTool("job_result", { job_id }),
+      ),
+    );
+    if (results.every(({ status }) => typeof status === "string")) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  assert.equal(results.length, 12);
+  assert.equal(results.every(({ status }) => status === "completed"), true);
+  assert.equal(results.every(({ final_message }) => final_message === "instant"), true);
+  const sideEffects = Array.from(
+    { length: 12 },
+    (_, index) => `side-effect-${index}.txt`,
+  ).sort();
+  assert.deepEqual((await readdir(workingDir)).sort(), sideEffects);
+  assert.deepEqual(
+    await Promise.all(
+      sideEffects.map((name) => readFile(resolve(workingDir, name), "utf8")),
+    ),
+    Array.from({ length: 12 }, () => "once\n"),
+  );
+});
+
+test("jsonl-events preserves malformed lines without inventing result facts", async (t) => {
+  const fixture = await mkdtemp(resolve(tmpdir(), "divisi-jsonl-malformed-"));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "jsonl-worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  const rawOutput = [
+    JSON.stringify({ type: "progress", message: "valid progress" }),
+    "{ definitely not JSON",
+    JSON.stringify({ type: "vendor-private", message: "do not invent this" }),
+    JSON.stringify({ type: "usage", input_tokens: "999", cost_usd: -1 }),
+    JSON.stringify({ type: "message", message: "older terminal", terminal: true }),
+    JSON.stringify({ type: "message", message: "latest terminal", terminal: true }),
+  ].join("\n");
+  await mkdir(workingDir);
+  await writeFile(workerPath, `process.stdout.write(${JSON.stringify(rawOutput)});`);
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "jsonl-fake",
+          capability_summary: "A scripted structured-output Worker.",
+          command: process.execPath,
+          args: [workerPath, "{task_brief}"],
+          output_dialect: "jsonl-events",
+        },
+      ],
+    }),
+  );
+  const client = new McpClient({
+    cwd: repoRoot,
+    env: {
+      DIVISI_WORKERS_FILE: registryPath,
+      LOCALAPPDATA: stateRoot,
+      XDG_STATE_HOME: stateRoot,
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await client.initialize();
+
+  const result = await client.callTool("delegate", {
+    worker: "jsonl-fake",
+    task_brief: "Emit mixed structured output.",
+    working_dir: workingDir,
+    wait_seconds: 15,
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.final_message, "latest terminal");
+  assert.equal("usage" in result, false);
+  assert.equal(await readFile(result.log_path, "utf8"), rawOutput);
+});
+
+test("jsonl-events keeps latest explicit zero usage without a terminal message", async (t) => {
+  const fixture = await mkdtemp(resolve(tmpdir(), "divisi-jsonl-partial-usage-"));
+  const workingDir = resolve(fixture, "repo");
+  const stateRoot = resolve(fixture, "state");
+  const workerPath = resolve(fixture, "jsonl-worker.mjs");
+  const registryPath = resolve(fixture, "workers.json");
+  await mkdir(workingDir);
+  await writeFile(
+    workerPath,
+    [
+      'process.stdout.write(JSON.stringify({ type: "usage", input_tokens: 10, cost_usd: 0.5 }) + "\\n");',
+      'process.stdout.write(JSON.stringify({ type: "usage", input_tokens: 0, output_tokens: 4, cost_usd: 0 }) + "\\n");',
+      'process.stdout.write(JSON.stringify({ type: "message", message: "nonterminal", terminal: false }));',
+    ].join("\n"),
+  );
+  await writeFile(
+    registryPath,
+    JSON.stringify({
+      workers: [
+        {
+          id: "jsonl-fake",
+          capability_summary: "A scripted structured-output Worker.",
+          command: process.execPath,
+          args: [workerPath, "{task_brief}"],
+          output_dialect: "jsonl-events",
+        },
+      ],
+    }),
+  );
+  const client = new McpClient({
+    cwd: repoRoot,
+    env: {
+      DIVISI_WORKERS_FILE: registryPath,
+      LOCALAPPDATA: stateRoot,
+      XDG_STATE_HOME: stateRoot,
+    },
+  });
+  t.after(async () => {
+    await client.close();
+    await rm(fixture, { recursive: true, force: true });
+  });
+  await client.initialize();
+
+  const result = await client.callTool("delegate", {
+    worker: "jsonl-fake",
+    task_brief: "Report partial usage only.",
+    working_dir: workingDir,
+    wait_seconds: 15,
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.final_message, "");
+  assert.deepEqual(result.usage, {
+    input_tokens: 0,
+    output_tokens: 4,
+    cost_usd: 0,
+  });
+  assert.equal("total_tokens" in result.usage, false);
+});
