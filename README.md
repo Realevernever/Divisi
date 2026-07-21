@@ -82,7 +82,7 @@ The plugin pins its MCP server to the matching `divisi` npm release, so an
 installed plugin version stays reproducible instead of silently tracking
 "latest". The plugin channel does not put a `divisi` binary on your PATH; when
 a section below shows a `divisi` command, plugin users run the pinned form
-`npx --yes divisi@0.1.0 <command>` instead.
+`npx --yes divisi@0.1.1 <command>` instead.
 
 ### Path B — global npm install
 
@@ -151,7 +151,7 @@ where relevant but never prints their values:
 
 ```sh
 divisi doctor            # npm install
-npx --yes divisi@0.1.0 doctor   # plugin install
+npx --yes divisi@0.1.1 doctor   # plugin install
 ```
 
 Doctor is advisory. A missing *optional* environment variable does not make
@@ -189,7 +189,7 @@ Prefer delegating suitable work over doing everything yourself. Good triggers ar
 
 ```sh
 # Plugin install
-npx --yes divisi@0.1.0 snippet --target repo
+npx --yes divisi@0.1.1 snippet --target repo
 # Global npm install
 divisi snippet --target repo
 ```
@@ -204,7 +204,7 @@ When a `delegate` tool is available, prefer delegating suitable work over doing 
 
 ```sh
 # Plugin install
-npx --yes divisi@0.1.0 snippet --target global --print
+npx --yes divisi@0.1.1 snippet --target global --print
 # Global npm install
 divisi snippet --target global --print
 ```
@@ -265,7 +265,7 @@ $divisiPreRoot = Join-Path ([IO.Path]::GetTempPath()) ("divisi-prerelease-" + [G
 $divisiPreInstall = Join-Path $divisiPreRoot "install"
 New-Item -ItemType Directory -Path $divisiPreRoot -Force | Out-Null
 npm pack --pack-destination $divisiPreRoot
-npm install --prefix $divisiPreInstall (Join-Path $divisiPreRoot "divisi-0.1.0.tgz")
+npm install --prefix $divisiPreInstall (Join-Path $divisiPreRoot "divisi-0.1.1.tgz")
 $env:CODEX_HOME = Join-Path $divisiPreRoot "codex-home"
 & (Join-Path $divisiPreInstall "node_modules\.bin\divisi.cmd") init --snippet neither
 codex
@@ -276,7 +276,7 @@ macOS or Linux:
 ```sh
 divisi_pre_root="$(mktemp -d)"
 npm pack --pack-destination "$divisi_pre_root"
-npm install --prefix "$divisi_pre_root/install" "$divisi_pre_root/divisi-0.1.0.tgz"
+npm install --prefix "$divisi_pre_root/install" "$divisi_pre_root/divisi-0.1.1.tgz"
 export CODEX_HOME="$divisi_pre_root/codex-home"
 "$divisi_pre_root/install/node_modules/.bin/divisi" init --snippet neither
 codex

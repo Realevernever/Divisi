@@ -51,7 +51,16 @@ test("the Codex marketplace installs Divisi's skills and MCP server", async () =
   assert.equal(plugin.mcpServers, "./.mcp.json");
   assert.deepEqual(mcp.mcpServers.divisi, {
     command: "npx",
-    args: ["--yes", `divisi@${packageJson.version}`, "serve"],
+    args: [
+      "--yes",
+      "--prefix",
+      "./scripts",
+      "--package",
+      `divisi@${packageJson.version}`,
+      "--",
+      "divisi",
+      "serve",
+    ],
     cwd: ".",
   });
   assert.equal(marketplace.name, "divisi");

@@ -2,7 +2,16 @@
   "mcpServers": {
     "divisi": {
       "command": "npx",
-      "args": ["--yes", "divisi@0.1.0", "serve"],
+      "args": [
+        "--yes",
+        "--prefix",
+        "./scripts",
+        "--package",
+        "divisi@0.1.1",
+        "--",
+        "divisi",
+        "serve"
+      ],
       "cwd": "."
     }
   }

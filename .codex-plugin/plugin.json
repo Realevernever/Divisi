@@ -1,6 +1,6 @@
 {
   "name": "divisi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Delegate Codex work to frontier-model vendor CLIs while Codex stays in charge.",
   "author": {
     "name": "Evernever",
