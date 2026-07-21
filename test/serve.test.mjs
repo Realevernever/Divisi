@@ -48,6 +48,18 @@ test("an MCP client discovers the tracer-bullet tools", async (t) => {
   });
 });
 
+test("MCP initialize reports the current package version", async (t) => {
+  const packageJson = JSON.parse(
+    await readFile(resolve(repoRoot, "package.json"), "utf8"),
+  );
+  const client = new McpClient({ cwd: repoRoot });
+  t.after(() => client.close());
+
+  const initialized = await client.initialize();
+
+  assert.equal(initialized.serverInfo.version, packageJson.version);
+});
+
 test("list_workers reports safe Worker option discovery without flag syntax", async (t) => {
   const fixture = await mkdtemp(resolve(tmpdir(), "divisi-registry-"));
   t.after(() => rm(fixture, { recursive: true, force: true }));

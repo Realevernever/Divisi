@@ -38,12 +38,13 @@ export class McpClient {
   }
 
   async initialize() {
-    await this.request("initialize", {
+    const response = await this.request("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
       clientInfo: { name: "divisi-test", version: "1.0.0" },
     });
     this.notify("notifications/initialized");
+    return response;
   }
 
   request(method, params = {}) {

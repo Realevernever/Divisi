@@ -32,6 +32,19 @@ import {
 } from "./output-dialect.js";
 import { initCommand, snippetCommand } from "./installer.js";
 
+const packageMetadata = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("../package.json", import.meta.url)),
+    "utf8",
+  ),
+) as { version?: unknown };
+
+if (typeof packageMetadata.version !== "string") {
+  throw new Error("Divisi package metadata does not contain a version");
+}
+
+const packageVersion = packageMetadata.version;
+
 const tools = [
   {
     name: "delegate",
@@ -733,7 +746,7 @@ function serve(): void {
       respond(request.id, {
         protocolVersion: "2025-06-18",
         capabilities: { tools: {} },
-        serverInfo: { name: "divisi", version: "0.1.0" },
+        serverInfo: { name: "divisi", version: packageVersion },
       });
       return;
     }
