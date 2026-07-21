@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "divisi": {
+      "command": "npx",
+      "args": ["--yes", "divisi@0.1.0", "serve"],
+      "cwd": "."
+    }
+  }
+}

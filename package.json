@@ -7,6 +7,8 @@
     "divisi": "dist/cli.js"
   },
   "files": [
+    ".codex-plugin/plugin.json",
+    ".mcp.json",
     "dist",
     "docs/cleanup.md",
     "docs/installer.md",
@@ -17,6 +19,9 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "check:credentials": "node scripts/check-credentials.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run check:credentials",
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs"
   },
   "engines": {

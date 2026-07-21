@@ -1,0 +1,37 @@
+{
+  "name": "divisi",
+  "version": "0.1.0",
+  "description": "Delegate Codex work to frontier-model vendor CLIs while Codex stays in charge.",
+  "author": {
+    "name": "Evernever",
+    "url": "https://github.com/Realevernever"
+  },
+  "homepage": "https://github.com/Realevernever/Divisi#readme",
+  "repository": "https://github.com/Realevernever/Divisi",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "delegation",
+    "mcp",
+    "grok",
+    "kimi"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Divisi",
+    "shortDescription": "Delegate bounded Codex work to Grok and Kimi",
+    "longDescription": "Divisi gives Codex the skills and MCP tools to delegate bounded work to installed Grok and Kimi vendor CLIs, inspect mechanical results, and keep final judgment with the Orchestrator.",
+    "developerName": "Evernever",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Realevernever/Divisi",
+    "defaultPrompt": [
+      "Delegate this bounded task to the best Divisi Worker and review the result."
+    ],
+    "brandColor": "#6D5BD0"
+  }
+}
