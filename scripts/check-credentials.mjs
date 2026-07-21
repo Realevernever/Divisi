@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { normalizeNpmPackResult } from "./npm-pack-json.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const npmCli =
@@ -38,7 +39,7 @@ function packagedFiles() {
     "--dry-run",
     "--json",
   ]);
-  const [pack] = JSON.parse(output);
+  const pack = normalizeNpmPackResult(JSON.parse(output));
   return pack.files.map(({ path }) => path);
 }
 

@@ -5,6 +5,8 @@ import { resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { normalizeNpmPackResult } from "../scripts/npm-pack-json.mjs";
+
 const repoRoot = resolve(import.meta.dirname, "..");
 const execFileAsync = promisify(execFile);
 const npmCli =
@@ -15,6 +17,15 @@ async function readJson(path) {
   return JSON.parse(await readFile(resolve(repoRoot, path), "utf8"));
 }
 
+test("release tooling accepts bundled and current npm pack JSON shapes", () => {
+  const pack = { files: [{ path: "package.json" }] };
+
+  assert.equal(normalizeNpmPackResult([pack]), pack);
+  assert.equal(normalizeNpmPackResult({ divisi: pack }), pack);
+  assert.throws(() => normalizeNpmPackResult({}), /unexpected shape/);
+});
+
+
 let dryRunPackagePromise;
 function dryRunPackage() {
   dryRunPackagePromise ??= execFileAsync(
@@ -22,7 +33,7 @@ function dryRunPackage() {
     [npmCli, "pack", "--dry-run", "--json"],
     { cwd: repoRoot, encoding: "utf8", windowsHide: true },
   ).then(({ stdout }) => {
-    const [pack] = JSON.parse(stdout);
+    const pack = normalizeNpmPackResult(JSON.parse(stdout));
     return pack;
   });
   return dryRunPackagePromise;
@@ -90,7 +101,7 @@ test("README alone guides a new adopter to a first reviewed Delegation", async (
     /npm install --global @moonshot-ai\/kimi-code/,
     /kimi login/,
     /vendor CLIs own their credentials/i,
-    /Divisi never reads, stores, or forwards\s+them/i,
+    /Divisi never reads, stores, or\s+forwards\s+them/i,
     /codex plugin list --json/,
     /skills\/delegating\/SKILL\.md/,
     /skills\/prompting-grok\/SKILL\.md/,
@@ -99,7 +110,7 @@ test("README alone guides a new adopter to a first reviewed Delegation", async (
     /When a `delegate` tool is available, prefer delegating suitable work over doing everything yourself\. Good triggers are parallelizable batches, long-horizon tasks, frontend or visual work, and large-context analysis\./,
     /global custom instructions[^.]*sometimes[^.]*project chats/is,
     /repo[^.]*AGENTS\.md[^.]*more reliable/is,
-    /MIT License/,
+    /\[MIT\]\(LICENSE\)/,
     /Evernever/,
     /list_workers/,
     /delegate/,
@@ -151,17 +162,16 @@ test("README keeps comparative Worker routing in the delegating skill", async ()
   );
 });
 
-test("README provides a reproducible pre-release tarball walkthrough", async () => {
+test("README provides a reproducible source-tarball walkthrough", async () => {
   const readme = await readFile(resolve(repoRoot, "README.md"), "utf8");
 
-  assert.match(readme, /## Pre-release maintainer walkthrough/);
-  assert.match(readme, /`divisi@0\.1\.0` is not yet published to npm/);
+  assert.match(readme, /Maintainers: verify an unpublished checkout/);
   assert.match(readme, /npm pack --pack-destination/);
   assert.match(readme, /npm install --prefix/);
   assert.match(readme, /CODEX_HOME/);
   assert.match(readme, /init --snippet neither/);
   assert.match(
     readme,
-    /For a pre-release source checkout, complete the pre-release maintainer walkthrough/i,
+    /This walkthrough proves the package from the current checkout/i,
   );
 });

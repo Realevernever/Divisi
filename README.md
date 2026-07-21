@@ -1,81 +1,107 @@
-# Divisi
+<div align="center">
 
-Divisi gives Codex the knowledge and MCP tools to delegate bounded work to
-frontier-model vendor CLIs while Codex remains the Orchestrator and reviews the
-result.
+# 🎼 Divisi
 
-## What Divisi does
+**Codex conducts. Other frontier models play their parts.**
 
-Codex stays in charge. It chooses a Worker, writes a bounded Task brief, starts a
-Delegation through Divisi's MCP server, and independently reviews the mechanical
-Job result. Divisi wraps the Workers' own coding-agent CLIs; it does not replace
-their agent loops, decide whether their work is correct, or merge their changes.
+</div>
+
+> In an orchestral score, ***divisi*** marks the moment one section divides to
+> play several parts at once — still one section, still under one conductor.
+
+That is what this plugin does to a Codex session. Codex stays on the podium.
+It hands bounded pieces of work — a batch of independent fixes, a long
+refactor, a frontend rebuild — to other frontier models through their own
+vendor CLIs. It briefs each one, lets it play, and reviews every note before
+anything lands.
+
+## The idea in one minute
+
+Strong models such as Grok 4.5 and Kimi K3 live inside their own coding
+CLIs, and each is good at different things. Without help, Codex does
+everything itself, one task at a time.
+
+Divisi gives Codex two things:
+
+- **Knowledge** — three editable skills that say which Worker fits which
+  task, and how to write a brief that each one follows well.
+- **Mechanics** — a small MCP server that launches a Worker's CLI as a
+  subprocess, records the job on disk, and reports plain facts when it ends.
+
+A Delegation runs like this:
+
+1. Codex picks a Worker and writes one bounded Task brief.
+2. Divisi starts that Worker's own CLI — either in place in your directory,
+   or in an isolated git worktree on its own `divisi/<job-id>` branch.
+3. The Worker runs detached. Codex keeps working. Closing the session does
+   not stop the job; any later session can pick it up again.
+4. When the Worker exits, Divisi returns a mechanical Job result: exit
+   status, the Worker's final message, a change summary, a log path. Facts
+   only — never a verdict on whether the work is good.
+5. Codex reads the diff, runs the checks, and decides. Divisi never merges a
+   branch for you, never grades the work, and never touches your credentials.
+
+## The players
 
 Divisi ships registry entries and prompting skills for Grok 4.5 and Kimi K3.
-Setup belongs in this README; task-shape routing lives in
-`skills/delegating/SKILL.md`.
+Comparative task-shape routing lives in
+`skills/delegating/SKILL.md`, where it remains editable instead of hard-coded
+into the release.
 
-## Requirements
+Adding a Worker of your own is a [registry entry](docs/worker-registry.md)
+plus a skill file — no code, as long as its CLI speaks one of the built-in
+output dialects.
 
-- Codex CLI or Codex Desktop with plugin support.
-- Node.js 22 or newer. The plugin registration uses `npx` to run the pinned
-  Divisi npm release.
-- At least one supported vendor CLI, installed and authenticated by you.
+## Install
 
-**Release status:** `divisi@0.1.0` is not yet published to npm. The normal
-plugin and npm instructions below are the post-publication paths; maintainers
-verifying the current checkout must use the pre-release walkthrough.
+You need:
 
-## Install through the Codex plugin channel
+- **Codex** (CLI or Desktop) with plugin support
+- **Node.js 22 or newer**
+- at least one Worker CLI, installed and signed in by you — see
+  [Set up a Worker](#set-up-a-worker)
 
-This is the primary install path. The repository is a Codex marketplace whose
-Divisi plugin bundles the three skills and MCP registration.
+### Path A — the Codex plugin (recommended)
+
+This repository is a Codex marketplace. Two commands install the skills and
+the MCP server together:
 
 ```sh
 codex plugin marketplace add Realevernever/Divisi
 codex plugin add divisi@divisi
 ```
 
-Start a new Codex task after installation so the new skills and MCP tools are
-loaded. Confirm the installation when needed:
+Start a **new** Codex task so it loads the new skills and tools, and confirm
+the install if you like:
 
 ```sh
 codex plugin list --json
 ```
 
-The plugin pins its MCP launch to the matching `divisi` npm version. A newly
-published plugin version therefore remains reproducible instead of silently
-running a different latest package.
-The plugin channel does not install a global `divisi` binary. For Divisi CLI
-commands below, plugin-only users use the pinned `npx --yes divisi@0.1.0 ...`
-form shown beside the shorter command for manual npm installs.
+The plugin pins its MCP server to the matching `divisi` npm release, so an
+installed plugin version stays reproducible instead of silently tracking
+"latest". The plugin channel does not put a `divisi` binary on your PATH; when
+a section below shows a `divisi` command, plugin users run the pinned form
+`npx --yes divisi@0.1.0 <command>` instead.
 
-## Manual npm and config.toml install
+### Path B — global npm install
 
-Standalone Codex configurations can install the executable from npm:
+For standalone Codex configurations:
 
 ```sh
 npm install --global divisi
-```
-
-Choose one setup style; do not combine them.
-
-### Installer-managed config
-
-Let Divisi register an owned MCP block and copy all three skills below
-`$CODEX_HOME/skills`:
-
-```sh
 divisi init --snippet neither
 ```
 
-Use `--snippet repo`, `global`, or `both` only when you also want the
-corresponding Nudge.
+`divisi init` registers an installer-owned MCP block in your Codex config and
+copies the three skills into `$CODEX_HOME/skills` (`CODEX_HOME` defaults to
+`~/.codex`). Pass `--snippet repo`, `global`, or `both` if you also want the
+[Nudge](#add-the-optional-nudge) applied right away.
 
-### Hand-managed config.toml
+<details>
+<summary><strong>Prefer to manage config.toml by hand?</strong></summary>
 
-If you manage Codex configuration yourself, add this MCP entry to
-`$CODEX_HOME/config.toml` (normally `~/.codex/config.toml`):
+Add this to `$CODEX_HOME/config.toml` yourself:
 
 ```toml
 [mcp_servers.divisi]
@@ -83,18 +109,154 @@ command = "divisi"
 args = ["serve"]
 ```
 
-Copy the three directories from `<npm root --global>/divisi/skills/` into
-`$CODEX_HOME/skills/`. Do not run `divisi init` after creating an unowned
-`[mcp_servers.divisi]` table: the installer deliberately refuses to replace
-configuration it does not own. See [installer details](docs/installer.md) for
-target precedence and safety behavior.
+Then copy the three directories from `<npm root --global>/divisi/skills/`
+into `$CODEX_HOME/skills/`. Choose one style and stay with it: `divisi init`
+deliberately refuses to replace a `[mcp_servers.divisi]` table it does not
+own. [Installer details](docs/installer.md) cover target precedence and the
+safety rules.
 
-## Pre-release maintainer walkthrough
+</details>
 
-Use this path to prove the package from the current checkout before npm
-publication. It keeps the installed tarball and Codex configuration under one
-new temporary directory; it does not modify your normal Codex configuration.
-Run it from the repository root.
+## Set up a Worker
+
+The vendor CLIs own their credentials. Divisi never reads, stores, or
+forwards them — it only launches a CLI that you have already signed in to.
+
+**Grok 4.5** — install the [Grok Build CLI](https://docs.x.ai/build/cli/reference),
+sign in, verify:
+
+```sh
+npm install --global @xai-official/grok
+grok login
+grok --version
+```
+
+Grok also supports its documented API-key path; either way the credential
+stays with Grok.
+
+**Kimi K3** — install the [Kimi Code CLI](https://moonshotai.github.io/kimi-code/en/guides/getting-started.html),
+sign in, verify:
+
+```sh
+npm install --global @moonshot-ai/kimi-code
+kimi login
+kimi --version
+```
+
+Kimi's managed OAuth or its own `config.toml` supplies the credential;
+exporting a bare provider key is not a substitute.
+
+Then let Divisi check both registry entries — it names environment variables
+where relevant but never prints their values:
+
+```sh
+divisi doctor            # npm install
+npx --yes divisi@0.1.0 doctor   # plugin install
+```
+
+Doctor is advisory. A missing *optional* environment variable does not make
+vendor-managed sign-in unhealthy.
+
+## Your first Delegation
+
+1. Install Divisi by either path above.
+2. Install and sign in to at least one Worker.
+3. Run `doctor` and fix any missing CLI or failed version probe.
+4. Open a new Codex task in a disposable directory and paste:
+
+```text
+Use Divisi. Call list_workers, then choose an available Worker and call delegate
+in_place with this directory as working_dir. Ask it to create
+divisi-first-delegation.txt containing exactly: Divisi delegation works.
+Wait for completion, then independently review the resulting file and Job result.
+Do not accept the Worker's final message as proof.
+```
+
+Success looks like a `completed` Job result and a reviewed file containing
+exactly `Divisi delegation works.` If the call returns only a `job_id`, Codex
+checks in with `job_status` at a natural pause and collects `job_result`
+after the Worker exits.
+
+## Add the optional Nudge
+
+By default Divisi only *enables* delegation; a short Nudge in `AGENTS.md`
+makes it the standing habit for suitable work. The repo variant is assertive,
+because the repository has opted in:
+
+```text
+Prefer delegating suitable work over doing everything yourself. Good triggers are parallelizable batches, long-horizon tasks, frontend or visual work, and large-context analysis.
+```
+
+```sh
+# Plugin install
+npx --yes divisi@0.1.0 snippet --target repo
+# Global npm install
+divisi snippet --target repo
+```
+
+The global variant is guarded — "when a `delegate` tool is available…" —
+because not every repository has Divisi. Print a paste-ready copy for Codex
+Desktop's Custom Instructions with:
+
+```text
+When a `delegate` tool is available, prefer delegating suitable work over doing everything yourself. Good triggers are parallelizable batches, long-horizon tasks, frontend or visual work, and large-context analysis.
+```
+
+```sh
+# Plugin install
+npx --yes divisi@0.1.0 snippet --target global --print
+# Global npm install
+divisi snippet --target global --print
+```
+
+One known Codex caveat: global custom instructions sometimes do not reach
+project chats. For a project that should consistently delegate, the repo
+`AGENTS.md` Nudge is the more reliable surface.
+
+## Make it yours
+
+The routing rules and prompting guidance are plain, editable Markdown:
+
+| File | Owns |
+|---|---|
+| `skills/delegating/SKILL.md` | which Worker gets which task shape |
+| `skills/prompting-grok/SKILL.md` | how to brief Grok |
+| `skills/prompting-kimi/SKILL.md` | how to brief Kimi |
+
+With a manual install, the live copies sit under `$CODEX_HOME/skills/`. With
+a plugin install, run `codex plugin list --json`, find `divisi@divisi`, and
+edit under its `source.path` — but note that plugin upgrades can replace
+those edits, so keep durable customizations in a forked marketplace or use
+the manual install. Start a new Codex task after editing a skill.
+
+## Housekeeping
+
+Worktree Delegations leave behind branches, worktree directories, logs, and
+job records. Divisi cleans up in tiers: a **Snapshot commit** preserves a
+finished job's uncommitted changes the moment its CLI exits, an automatic
+**retention sweep** (at most daily) removes the safe clutter, and anything
+irreversible — unmerged `divisi/*` branches above all — waits for you and
+`divisi clean`. Details in [docs/cleanup.md](docs/cleanup.md).
+
+## What Divisi will never do
+
+- **Hold your credentials.** It ships invocation recipes and environment
+  variable *names*, never values. Vendor credential files stay in each
+  vendor CLI's own home and are excluded from the npm package.
+  `npm run check:credentials` enforces this shape at publish time — a strong
+  guard, though not an exhaustive proof against every credential format.
+  The gate scans for high-confidence credential-value signatures.
+- **Merge a Worker's branch.** Worktree results come back as a branch and a
+  diff; the merge is always a deliberate act by Codex and you.
+- **Grade the work.** Job results carry only what the MCP server observed.
+  Judgment belongs to the Orchestrator.
+
+<details>
+<summary><strong>Maintainers: verify an unpublished checkout</strong></summary>
+
+This walkthrough proves the package from the current checkout without
+touching your normal Codex configuration. Run it from the repository root; it
+keeps everything under one temporary directory.
 
 Windows PowerShell:
 
@@ -122,155 +284,13 @@ codex
 
 Keep that terminal open so Codex inherits the isolated `CODEX_HOME`. The
 installer copies the packaged skills and registers the tarball-installed MCP
-server by absolute path. Vendor CLI authentication remains in the vendor CLI;
-Divisi does not copy it. Continue with [First Delegation](#first-delegation).
+server by absolute path. Then continue with
+[Your first Delegation](#your-first-delegation).
 
-## Set up a Worker
-
-The vendor CLIs own their credentials. Divisi never reads, stores, or forwards
-them. It only launches a CLI that you have already authenticated. Registry and
-doctor output may name an authentication environment variable, such as
-`XAI_API_KEY`, but never contain its value.
-
-### Grok 4.5
-
-Install [Grok Build CLI](https://docs.x.ai/build/cli/reference), authenticate,
-and verify the command:
-
-```sh
-npm install --global @xai-official/grok
-grok login
-grok --version
-```
-
-Grok also supports its vendor-documented API-key path, but credential ownership
-still stays with Grok.
-
-### Kimi K3
-
-Install [Kimi Code CLI](https://moonshotai.github.io/kimi-code/en/guides/getting-started.html),
-authenticate, and verify the command:
-
-```sh
-npm install --global @moonshot-ai/kimi-code
-kimi login
-kimi --version
-```
-
-Kimi's managed OAuth or its own `config.toml` supplies credentials; exporting
-a bare provider key is not a substitute for Kimi login/configuration.
-
-Check both registry entries without exposing credential values:
-
-```sh
-# Plugin-channel install
-npx --yes divisi@0.1.0 doctor
-# Manual npm install
-divisi doctor
-```
-
-Doctor is advisory. A missing optional observed environment variable does not
-make vendor-managed authentication unhealthy.
-
-## Customize routing and prompts
-
-The public skill files are intentionally editable Markdown:
-
-- `skills/delegating/SKILL.md` owns comparative routing rules.
-- `skills/prompting-grok/SKILL.md` owns Grok Task-brief guidance.
-- `skills/prompting-kimi/SKILL.md` owns Kimi Task-brief guidance.
-
-For a plugin-channel install, run `codex plugin list --json`, find
-`divisi@divisi`, and use its `source.path` as the plugin root; the files are
-under `<source.path>/skills/`. Codex-managed plugin upgrades can replace edits
-there, so keep durable customizations in a forked marketplace or use the manual
-install.
-
-For a manual install, the editable copies live at:
-
-- `$CODEX_HOME/skills/delegating/SKILL.md`
-- `$CODEX_HOME/skills/prompting-grok/SKILL.md`
-- `$CODEX_HOME/skills/prompting-kimi/SKILL.md`
-
-`CODEX_HOME` defaults to `~/.codex`. Start a new Codex task after changing a
-skill so the task loads the revised instructions.
-
-## Add the optional Nudge
-
-The repo variant is assertive because the repository has opted into Divisi:
-
-```text
-Prefer delegating suitable work over doing everything yourself. Good triggers are parallelizable batches, long-horizon tasks, frontend or visual work, and large-context analysis.
-```
-
-Apply it to the current repository with:
-
-```sh
-# Plugin-channel install
-npx --yes divisi@0.1.0 snippet --target repo
-# Manual npm install
-divisi snippet --target repo
-```
-
-The global variant is guarded because Divisi may not be available in every
-repository:
-
-```text
-When a `delegate` tool is available, prefer delegating suitable work over doing everything yourself. Good triggers are parallelizable batches, long-horizon tasks, frontend or visual work, and large-context analysis.
-```
-
-Print a paste-ready copy for Codex Desktop Custom Instructions with:
-
-```sh
-# Plugin-channel install
-npx --yes divisi@0.1.0 snippet --target global --print
-# Manual npm install
-divisi snippet --target global --print
-```
-
-Known Codex caveat: global custom instructions are sometimes not injected into
-project chats. A repo `AGENTS.md` Nudge is therefore the more reliable surface
-for a project that should consistently prefer Delegation.
-
-## First Delegation
-
-1. For a pre-release source checkout, complete the pre-release maintainer walkthrough.
-   After npm publication, install Divisi through either normal path above.
-2. Install and authenticate at least one Worker.
-3. Run the `doctor` form matching your install path above and fix any missing
-   CLI or failed version probe.
-4. Open a new Codex task in a disposable directory and paste:
-
-```text
-Use Divisi. Call list_workers, then choose an available Worker and call delegate
-in_place with this directory as working_dir. Ask it to create
-divisi-first-delegation.txt containing exactly: Divisi delegation works.
-Wait for completion, then independently review the resulting file and Job result.
-Do not accept the Worker's final message as proof.
-```
-
-A successful walkthrough ends with a `completed` Job result and the reviewed
-file containing exactly `Divisi delegation works.` If the call returns only a
-`job_id`, use `job_status` at a natural pause and `job_result` after the
-Worker exits.
-
-## Security and release contents
-
-Divisi ships invocation recipes and authentication variable names, never
-credential values. Vendor credential files remain under the vendor CLI's own
-home directory and are excluded from the npm package and plugin repository.
-
-`npm run check:credentials` structurally enforces that registry authentication
-entries store environment-variable names only and scans repository and package
-text for a bounded set of high-confidence credential-value signatures. This
-guard is not an exhaustive proof against every token format, encoding, or
-future credential shape.
-
-The npm package contains the `divisi` executable, default `workers.json`,
-three skills, Nudge snippets, plugin manifests, and operational documentation.
+</details>
 
 ## License
 
-Divisi is available under the [MIT License](LICENSE).
+[MIT](LICENSE) — Copyright (c) 2026 Evernever.
 
-Copyright (c) 2026 Evernever.
+*Tutti, but on your cue.*
