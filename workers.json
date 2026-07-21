@@ -1,0 +1,60 @@
+{
+  "workers": [
+    {
+      "id": "grok-4.5",
+      "capability_summary": "Grok 4.5 engineering Worker. Strong at bounded repo coding, tool loops, tests, and terminal work; weak at ungrounded facts, sole review, and style-led prose. Quirks: headless output may include ANSI-formatted CLI or plugin warnings before the final response; effort support for this model is narrower than broader CLI documentation.",
+      "skill_pointer": "prompting-grok",
+      "command": "grok",
+      "args": [
+        "-p",
+        "{task_brief}",
+        "--yolo",
+        "--output-format",
+        "plain",
+        "-m",
+        "grok-4.5"
+      ],
+      "output_dialect": "plain",
+      "auth": {
+        "mode": "vendor-managed",
+        "observed_env": [
+          "XAI_API_KEY"
+        ]
+      },
+      "version_args": ["--version"],
+      "options": {
+        "effort": {
+          "values": ["low", "medium", "high"],
+          "flag": "--effort {value}",
+          "default": "high"
+        }
+      }
+    },
+    {
+      "id": "kimi-k3",
+      "capability_summary": "Kimi K3 specialist Worker. Strong at long repo work, huge context, frontend and visual coding, and deep tool loops; weak at short routine jobs, fast chat, and ungrounded facts. Quirks: print mode auto-approves tools; structured streaming uses a vendor event shape rather than Divisi jsonl-events; text output may include transcript bullets and resume hints.",
+      "skill_pointer": "prompting-kimi",
+      "command": "kimi",
+      "args": [
+        "-p",
+        "{task_brief}",
+        "--output-format",
+        "text",
+        "-m",
+        "kimi-code/k3"
+      ],
+      "output_dialect": "plain",
+      "auth": {
+        "mode": "vendor-managed"
+      },
+      "version_args": ["--version"],
+      "options": {
+        "effort": {
+          "values": ["low", "high", "max"],
+          "env": "KIMI_MODEL_THINKING_EFFORT",
+          "default": "max"
+        }
+      }
+    }
+  ]
+}

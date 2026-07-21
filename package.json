@@ -12,7 +12,8 @@
     "docs/installer.md",
     "docs/worker-registry.md",
     "skills",
-    "snippets"
+    "snippets",
+    "workers.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

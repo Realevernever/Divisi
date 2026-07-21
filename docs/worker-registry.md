@@ -5,15 +5,24 @@ A Worker can expose named choices without leaking vendor CLI syntax into MCP cal
 Each option declares:
 
 - `values`: the complete allowlist accepted by `delegate`
-- `flag`: the Worker CLI argument template; `{value}` is replaced with the selected value
+- `flag`: optional Worker CLI argument template; `{value}` is replaced with the selected value and the result is split on whitespace into argv tokens
+- `env`: optional non-secret environment variable name whose allowlisted value is set for the Worker process only
 - `default`: the value used when `delegate` omits that option
+
+An option must declare at least one of `flag` or `env`. `list_workers` still reports only names, allowed values, and defaults — never `flag` or `env` syntax.
 
 Worker entries may also declare:
 
 - `required_env`: auth environment variable names reported by `divisi doctor`;
-  the registry never contains their values
+  absence makes the doctor probe unhealthy, and the registry never contains values
+- `auth.mode`: `vendor-managed` when OAuth or vendor configuration can authenticate
+  without a required shell variable
+- `auth.observed_env`: optional auth environment variable names reported by
+  `divisi doctor`; absence is informational and does not make the probe unhealthy
 - `version_args`: arguments used by `divisi doctor` to read the CLI version;
   when omitted, Divisi uses `["--version"]`
+
+When `DIVISI_WORKERS_FILE` is unset, Divisi loads the shipped `workers.json` next to the package root (Grok 4.5 and Kimi K3).
 
 ## Output dialects
 
@@ -53,15 +62,17 @@ belong in the parser.
 `divisi doctor` prints one tab-separated row per Worker:
 
 ```text
-<id>  cli=found|not-found  version=<output>  <ENV_NAME>=set|not-set
+<id>  cli=found|not-found  version=<output>  [auth=vendor-managed]  [<ENV_NAME>=set|not-set ...]
 ```
 
 The version column is present only when the command is found. A missing command,
-a non-zero or empty version response, or any missing required environment
-variable makes the command exit non-zero; otherwise it exits zero. Version
-commands receive only PATH lookup and operating-system process essentials, never
-the named auth variables. Doctor creates no logs and remains advisory:
-`delegate` does not consult probe results.
+a non-zero or empty version response, or any missing `required_env` variable
+makes the command exit non-zero. `auth=vendor-managed` records that the CLI may
+use its own OAuth or configuration state; missing `auth.observed_env` variables
+are reported but do not make that Worker unhealthy. Version commands receive
+only PATH lookup and operating-system process essentials, never the named auth
+variables. Doctor creates no logs and remains advisory: `delegate` does not
+consult probe results.
 
 Template tokens separated by whitespace become separate CLI arguments. The shipped example leans toward high reasoning effort:
 
@@ -96,4 +107,15 @@ Callers use only the option name and value:
 }
 ```
 
-An omitted option uses its registry default. An unknown option name or value fails before a Worker starts. `list_workers` reports option names, allowed values, and defaults, but never returns `flag`; the Worker registry alone owns vendor flag syntax.
+An omitted option uses its registry default. An unknown option name or value fails before a Worker starts. `list_workers` reports option names, allowed values, and defaults, but never returns `flag` or `env`; the Worker registry alone owns vendor flag and env syntax.
+
+### Shipped Workers
+
+The package ships `workers.json` with:
+
+| id | CLI | prompt | output | effort default | effort mapping | auth observation |
+|---|---|---|---|---|---|---|
+| `grok-4.5` | `grok` | `-p {task_brief}` plus `--yolo`, plain output, `-m grok-4.5` | `plain` | `high` | `--effort {value}` (`low`/`medium`/`high`) | vendor-managed; optionally observes `XAI_API_KEY` |
+| `kimi-k3` | `kimi` | `-p {task_brief}` plus text output, `-m kimi-code/k3` | `plain` | `max` | env `KIMI_MODEL_THINKING_EFFORT` (`low`/`high`/`max`; no CLI effort flag) | vendor-managed; no shell credential required |
+
+Kimi print mode already auto-approves tools; do not add `--yolo`/`--auto`/`--plan` beside `-p`. Kimi authenticates through OAuth or credentials in `config.toml`; its documented `KIMI_API_KEY` provider key is not read from a bare shell export. Grok supports vendor-managed login as well as the observed API-key environment path. With the shared `plain` dialect, the raw transcript remains the mechanical final message: Kimi may include transcript bullets or resume hints, and Grok may prefix ANSI-formatted CLI or plugin warnings.

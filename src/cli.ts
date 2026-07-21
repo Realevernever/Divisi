@@ -148,7 +148,8 @@ function respondError(
 
 type WorkerOption = {
   values: string[];
-  flag: string;
+  flag?: string;
+  env?: string;
   default: string;
 };
 
@@ -157,6 +158,10 @@ type Worker = {
   capability_summary: string;
   command: string;
   args: string[];
+  auth?: {
+    mode: "vendor-managed";
+    observed_env?: string[];
+  };
   output_dialect: OutputDialect;
   required_env?: string[];
   version_args?: string[];
@@ -198,9 +203,16 @@ type JobResult = {
   branch?: string;
 };
 
+function packageRoot(): string {
+  return fileURLToPath(new URL("../", import.meta.url));
+}
+
 function registryWorkers(): Worker[] {
-  const registryPath = process.env.DIVISI_WORKERS_FILE;
-  if (!registryPath) throw new Error("DIVISI_WORKERS_FILE is not set");
+  const configured = process.env.DIVISI_WORKERS_FILE;
+  const registryPath =
+    configured && configured.length > 0
+      ? configured
+      : join(packageRoot(), "workers.json");
   const registry = JSON.parse(readFileSync(registryPath, "utf8")) as {
     workers: Worker[];
   };
@@ -298,12 +310,20 @@ function doctor(): number {
       name,
       set: Object.hasOwn(process.env, name),
     }));
+    const observedAuth = (worker.auth?.observed_env ?? []).map((name) => ({
+      name,
+      set: Object.hasOwn(process.env, name),
+    }));
     const healthy = version?.healthy === true && auth.every(({ set }) => set);
     allHealthy &&= healthy;
     const columns = [
       oneLine(worker.id),
       `cli=${executable ? "found" : "not-found"}`,
       ...(version ? [`version=${version.output}`] : []),
+      ...(worker.auth ? [`auth=${worker.auth.mode}`] : []),
+      ...observedAuth.map(
+        ({ name, set }) => `${oneLine(name)}=${set ? "set" : "not-set"}`,
+      ),
       ...auth.map(
         ({ name, set }) => `${oneLine(name)}=${set ? "set" : "not-set"}`,
       ),
@@ -550,17 +570,32 @@ async function startDelegation(
     if (!Object.hasOwn(declaredOptions, name))
       throw new Error(`Unknown Worker option: ${name}`);
   }
-  const optionArgs = Object.entries(declaredOptions).flatMap(
-    ([name, option]) => {
-      const value = requestedOptions[name] ?? option.default;
-      if (!option.values.includes(value))
-        throw new Error(`Unknown value for Worker option ${name}: ${value}`);
-      return option.flag
-        .trim()
-        .split(/\s+/)
-        .map((arg) => arg.replaceAll("{value}", value));
-    },
-  );
+  const optionArgs: string[] = [];
+  const optionEnv: Record<string, string> = {};
+  for (const [name, option] of Object.entries(declaredOptions)) {
+    const value = requestedOptions[name] ?? option.default;
+    if (!option.values.includes(value))
+      throw new Error(`Unknown value for Worker option ${name}: ${value}`);
+    if (option.flag) {
+      optionArgs.push(
+        ...option.flag
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((arg) => arg.replaceAll("{value}", value)),
+      );
+    }
+    if (option.env) {
+      const envName = option.env.trim();
+      if (!envName) throw new Error(`Empty env name for Worker option ${name}`);
+      optionEnv[envName] = value;
+    }
+    if (!option.flag && !option.env) {
+      throw new Error(
+        `Worker option ${name} must declare flag and/or env mapping`,
+      );
+    }
+  }
   if (requestedIsolation !== "in_place" && requestedIsolation !== "worktree") {
     throw new Error(`Unknown isolation: ${requestedIsolation}`);
   }
@@ -603,7 +638,11 @@ async function startDelegation(
     started_at: createdAt,
     log_path: logPath,
     output_dialect: worker.output_dialect,
-    launch: { command: worker.command, args },
+    launch: {
+      command: worker.command,
+      args,
+      ...(Object.keys(optionEnv).length > 0 && { env: optionEnv }),
+    },
   });
 
   const jobPath = join(userStateDirectory(), "jobs", `${jobId}.json`);

@@ -21,6 +21,7 @@ import {
 type LaunchRecord = {
   command: string;
   args: string[];
+  env?: Record<string, string>;
 };
 
 type JobRecord = WorktreeJobFields & {
@@ -117,6 +118,12 @@ try {
     cwd: claimed.working_dir,
     windowsHide: true,
     stdio: ["ignore", logFile, logFile],
+    ...(launch.env && {
+      env: {
+        ...process.env,
+        ...launch.env,
+      },
+    }),
   });
 } catch {
   closeSync(logFile);
